@@ -1,9 +1,12 @@
+mod audio;
 mod config;
 mod grid;
 mod mayor;
 mod renderer;
 mod sim;
 
+use audio::AudioManager;
+use audio::mood;
 use config::SimConfig;
 use grid::terrain::generate_terrain;
 use macroquad::prelude::*;
@@ -46,6 +49,14 @@ async fn main() {
     let mut camera = GameCamera::new(initial_center);
     let mut day_night = DayNightCycle::new();
     let mut particles = ParticleSystem::new();
+
+    // Audio
+    let mut audio_mgr = AudioManager::new();
+    audio_mgr.load_local_tracks().await;
+    // If Spotify client ID is set, prefer that backend
+    if audio_mgr.spotify.available {
+        audio_mgr.backend = audio::AudioBackend::Spotify;
+    }
 
     // Speed control
     let speed_levels = [1.0_f32, 2.0, 4.0, 8.0];
@@ -100,11 +111,16 @@ async fn main() {
             // Recompute stats
             stats = CityStats::compute(&grid);
 
+            // Audio: re-evaluate mood every 10 ticks
+            if tick_count.is_multiple_of(config.audio_reeval_interval) {
+                let track = mood::select_track(&stats);
+                audio_mgr.transition_to(track);
+            }
+
             // Monument sting detection
             if mayor.monument_built && !monument_sting_played {
                 monument_sting_played = true;
-                // TODO: play monument sting audio
-                // Camera will have already been panned by the mayor
+                audio_mgr.play_sting(mood::TrackId::Monument);
             }
         }
 
@@ -112,6 +128,7 @@ async fn main() {
         camera.update(dt);
         day_night.update(dt);
         particles.update(dt);
+        audio_mgr.update(dt);
 
         // --- Set camera and draw world ---
         set_camera(&camera.to_macroquad_camera());
@@ -148,7 +165,7 @@ async fn main() {
 
         draw_text(
             &format!(
-                "Happy: {:.0}%  Power: {:.0}%  Water: {:.0}%  Fire: {}  Speed: {}x  {}  {:?}",
+                "Happy: {:.0}%  Power: {:.0}%  Water: {:.0}%  Fire: {}  Speed: {}x  {}  {:?}  Music: {}",
                 stats.happiness * 100.0,
                 stats.power_coverage * 100.0,
                 stats.water_coverage * 100.0,
@@ -156,6 +173,7 @@ async fn main() {
                 speed as u32,
                 day_night.phase_label(),
                 mayor.phase,
+                audio_mgr.current_mood_label,
             ),
             10.0,
             42.0,
