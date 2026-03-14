@@ -70,6 +70,11 @@ async fn main() {
     // Council vote state (kept between frames)
     let mut council_candidates: Option<[ActionCategory; 3]> = None;
 
+    // LLM state
+    let mut llm_request: Option<mayor::llm::LlmRequest> = None;
+    let mut conversation_history = mayor::llm::ConversationHistory::default();
+    let mut pending_audience_text = String::new();
+
     loop {
         let dt = get_frame_time();
 
@@ -112,6 +117,9 @@ async fn main() {
                             response_timer = 0.0;
                             last_phase_str = String::new();
                             council_candidates = None;
+                            llm_request = None;
+                            conversation_history = mayor::llm::ConversationHistory::default();
+                            pending_audience_text.clear();
 
                             let initial_center = vec2(0.0, (config.grid_height as f32) * TILE_H / 2.0);
                             camera = GameCamera::new(initial_center);
@@ -208,6 +216,42 @@ async fn main() {
                 particles.update(dt);
                 audio_mgr.update(dt);
                 influence_state.update(dt);
+
+                // Poll LLM request
+                if let Some(ref req) = llm_request {
+                    if let Some(result) = req.try_recv() {
+                        let yr = (tick_count / config.ticks_per_year as u64 + 1) as u32;
+                        let ssn = mayor::narration::season_name(tick_count, config.ticks_per_season);
+                        let p = mayor.personality();
+
+                        let response_text = match result {
+                            mayor::llm::LlmResult::Success(text) => text,
+                            mayor::llm::LlmResult::Error(err) => {
+                                // Fall back to scripted on error
+                                let fallback = influence::audience::process_audience(
+                                    &pending_audience_text, mayor.personality(), &mut rng,
+                                );
+                                format!("{} ({})", fallback.response, err)
+                            }
+                        };
+
+                        influence_state.set_compliance_boost(rng.gen_range(2..=3));
+                        mayor.log.push(yr, ssn, p.emoji, format!("[AUDIENCE] {}", response_text));
+                        conversation_history.push(
+                            pending_audience_text.clone(),
+                            response_text.clone(),
+                        );
+
+                        influence_modal = InfluenceModal::Audience {
+                            input: pending_audience_text.clone(),
+                            response: Some(response_text),
+                            waiting: false,
+                        };
+
+                        llm_request = None;
+                        pending_audience_text.clear();
+                    }
+                }
 
                 // Response toast timer
                 if response_timer > 0.0 {
@@ -367,22 +411,46 @@ async fn main() {
                         }
                         InfluenceAction::AudienceSubmit(text) => {
                             if influence_state.spend(5) {
-                                let result = influence::audience::process_audience(
-                                    &text, mayor.personality(), &mut rng,
-                                );
-
-                                influence_state.set_compliance_boost(result.compliance_boost);
-
-                                let p = mayor.personality();
+                                // Try LLM first, fall back to scripted
                                 let yr = (tick_count / config.ticks_per_year as u64 + 1) as u32;
-                                let ssn = mayor::narration::season_name(tick_count, config.ticks_per_season);
-                                mayor.log.push(yr, ssn, p.emoji, format!("[AUDIENCE] {}", result.response));
+                                let recent_log: Vec<_> = mayor.log.last_n(5)
+                                    .into_iter().cloned().collect();
 
-                                influence_modal = InfluenceModal::Audience {
-                                    input: text,
-                                    response: Some(result.response),
-                                    waiting: false,
-                                };
+                                if let Some(req) = mayor::llm::send_audience_request(
+                                    text.clone(),
+                                    mayor.personality(),
+                                    &stats,
+                                    recent_log,
+                                    &conversation_history,
+                                    funds,
+                                    yr,
+                                ) {
+                                    // LLM request sent — show waiting state
+                                    llm_request = Some(req);
+                                    pending_audience_text = text.clone();
+                                    influence_modal = InfluenceModal::Audience {
+                                        input: text,
+                                        response: None,
+                                        waiting: true,
+                                    };
+                                } else {
+                                    // No API key — use scripted fallback
+                                    let result = influence::audience::process_audience(
+                                        &text, mayor.personality(), &mut rng,
+                                    );
+                                    influence_state.set_compliance_boost(result.compliance_boost);
+
+                                    let p = mayor.personality();
+                                    let ssn = mayor::narration::season_name(tick_count, config.ticks_per_season);
+                                    mayor.log.push(yr, ssn, p.emoji, format!("[AUDIENCE] {}", result.response));
+
+                                    conversation_history.push(text.clone(), result.response.clone());
+                                    influence_modal = InfluenceModal::Audience {
+                                        input: text,
+                                        response: Some(result.response),
+                                        waiting: false,
+                                    };
+                                }
                             }
                         }
                         InfluenceAction::BuyIPConfirm => {

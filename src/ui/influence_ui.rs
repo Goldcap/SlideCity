@@ -339,7 +339,13 @@ fn draw_audience_modal(
     response: &Option<String>,
     waiting: bool,
 ) -> InfluenceAction {
-    let (action, _) = draw_modal_frame("Direct Audience", "Speak directly to the mayor:");
+    let llm_mode = crate::mayor::llm::api_available();
+    let subtitle = if llm_mode {
+        "Speak directly to the mayor (AI-powered):"
+    } else {
+        "Speak directly to the mayor:"
+    };
+    let (action, _) = draw_modal_frame("Direct Audience", subtitle);
 
     if action == InfluenceAction::CloseModal {
         return action;

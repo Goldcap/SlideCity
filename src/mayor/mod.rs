@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
+pub mod llm;
 pub mod narration;
 pub mod personality;
 
