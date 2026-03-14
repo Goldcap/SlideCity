@@ -1,12 +1,13 @@
 mod config;
 mod grid;
+mod mayor;
 mod renderer;
 mod sim;
 
 use config::SimConfig;
 use grid::terrain::generate_terrain;
-use grid::TileType;
 use macroquad::prelude::*;
+use mayor::Mayor;
 use renderer::camera::GameCamera;
 use renderer::iso::TILE_H;
 use renderer::lighting::DayNightCycle;
@@ -25,72 +26,6 @@ fn window_conf() -> Conf {
     }
 }
 
-/// Place initial test infrastructure so the simulation has something to grow from.
-fn place_test_infrastructure(grid: &mut grid::Grid, rng: &mut SmallRng) {
-    let cx = grid.width / 2;
-    let cy = grid.height / 2;
-
-    // Horizontal road across center
-    for col in (cx - 15)..=(cx + 15) {
-        if grid.in_bounds(col, cy) {
-            let cell = grid.get_mut(col, cy);
-            cell.tile = TileType::Road;
-            cell.age = 0;
-        }
-    }
-
-    // Vertical road crossing center
-    for row in (cy - 10)..=(cy + 10) {
-        if grid.in_bounds(cx, row) {
-            let cell = grid.get_mut(cx, row);
-            cell.tile = TileType::Road;
-            cell.age = 0;
-        }
-    }
-
-    // Seed residential blobs near the intersection
-    sim::growth::grow_blob(grid, cx + 2, cy + 2, TileType::Residential, 16, rng);
-    sim::growth::grow_blob(grid, cx - 3, cy - 3, TileType::Residential, 12, rng);
-
-    // Power plant on the west edge
-    let pp_col = cx - 18;
-    if grid.in_bounds(pp_col, cy) {
-        let cell = grid.get_mut(pp_col, cy);
-        cell.tile = TileType::PowerPlant;
-        cell.age = 0;
-    }
-
-    // Power line from plant toward residential
-    for col in (pp_col + 1)..=(cx - 16) {
-        if grid.in_bounds(col, cy) {
-            let cell = grid.get_mut(col, cy);
-            if cell.tile == TileType::Empty {
-                cell.tile = TileType::PowerLine;
-                cell.age = 0;
-            }
-        }
-    }
-
-    // Water tower on the east edge
-    let wt_col = cx + 18;
-    if grid.in_bounds(wt_col, cy) {
-        let cell = grid.get_mut(wt_col, cy);
-        cell.tile = TileType::WaterTower;
-        cell.age = 0;
-    }
-
-    // Water main from tower toward residential
-    for col in ((cx + 16)..wt_col).rev() {
-        if grid.in_bounds(col, cy) {
-            let cell = grid.get_mut(col, cy);
-            if cell.tile == TileType::Empty {
-                cell.tile = TileType::WaterMain;
-                cell.age = 0;
-            }
-        }
-    }
-}
-
 #[macroquad::main(window_conf)]
 async fn main() {
     let config = SimConfig::default();
@@ -99,9 +34,8 @@ async fn main() {
     let mut grid = generate_terrain(config.grid_width, config.grid_height, &mut rng);
     let mut next_grid = grid.clone();
 
-    place_test_infrastructure(&mut grid, &mut rng);
-    sim::utilities::recompute_utilities(&mut grid);
-
+    // Mayor builds the city from scratch — no test infrastructure needed
+    let mut mayor = Mayor::new(0); // The Developer (idx 0) — TODO: selection screen
     let mut funds: i64 = config.starting_funds;
     let mut tick_timer: f32 = 0.0;
     let mut tick_count: u64 = 0;
@@ -116,6 +50,9 @@ async fn main() {
     // Speed control
     let speed_levels = [1.0_f32, 2.0, 4.0, 8.0];
     let mut speed_idx: usize = 0;
+
+    // Monument sting flag
+    let mut monument_sting_played = false;
 
     loop {
         let dt = get_frame_time();
@@ -144,11 +81,31 @@ async fn main() {
                 sim::utilities::recompute_utilities(&mut grid);
             }
 
-            // Spawn particles from grid state
+            // Mayor decision every 8 ticks
+            if tick_count.is_multiple_of(config.mayor_tick_interval) {
+                mayor.decide(&mut grid, &stats, &config, &mut funds, tick_count, &mut rng);
+
+                // Process mayor camera requests
+                if let Some((x, y)) = mayor.camera_request.take() {
+                    camera.pan_to(vec2(x, y));
+                }
+                if let Some((x, y)) = mayor.shake_request.take() {
+                    camera.shake_at(vec2(x, y), 5.0, 0.5);
+                }
+            }
+
+            // Spawn particles
             particles.spawn_from_grid(&grid, &mut rng);
 
             // Recompute stats
             stats = CityStats::compute(&grid);
+
+            // Monument sting detection
+            if mayor.monument_built && !monument_sting_played {
+                monument_sting_played = true;
+                // TODO: play monument sting audio
+                // Camera will have already been panned by the mayor
+            }
         }
 
         // --- Update renderer state (every frame) ---
@@ -165,14 +122,9 @@ async fn main() {
         // --- UI (screen space) ---
         set_default_camera();
 
-        let year = tick_count / config.ticks_per_year as u64;
-        let season_tick = (tick_count % config.ticks_per_year as u64) / config.ticks_per_season as u64;
-        let season = match season_tick {
-            0 => "Spring",
-            1 => "Summer",
-            2 => "Fall",
-            _ => "Winter",
-        };
+        let year = tick_count / config.ticks_per_year as u64 + 1;
+        let season = mayor::narration::season_name(tick_count, config.ticks_per_season);
+        let p = mayor.personality();
 
         // Top HUD bar
         draw_rectangle(0.0, 0.0, screen_width(), 52.0, Color::new(0.0, 0.0, 0.0, 0.8));
@@ -185,7 +137,7 @@ async fn main() {
                 stats.com_count,
                 stats.ind_count,
                 funds,
-                year + 1,
+                year,
                 season,
             ),
             10.0,
@@ -196,14 +148,14 @@ async fn main() {
 
         draw_text(
             &format!(
-                "Happy: {:.0}%  Power: {:.0}%  Water: {:.0}%  Fire: {}  Speed: {}x  {}  Tick: {}",
+                "Happy: {:.0}%  Power: {:.0}%  Water: {:.0}%  Fire: {}  Speed: {}x  {}  {:?}",
                 stats.happiness * 100.0,
                 stats.power_coverage * 100.0,
                 stats.water_coverage * 100.0,
                 stats.fire_count,
                 speed as u32,
                 day_night.phase_label(),
-                tick_count,
+                mayor.phase,
             ),
             10.0,
             42.0,
@@ -211,22 +163,74 @@ async fn main() {
             Color::new(0.7, 0.8, 0.7, 1.0),
         );
 
+        // --- Right panel: Mayor log ---
+        let panel_x = screen_width() - 300.0;
+        draw_rectangle(panel_x, 0.0, 300.0, screen_height(), Color::new(0.0, 0.0, 0.0, 0.7));
+
+        // Mayor identity
+        draw_text(
+            &format!("{} {}", p.emoji, p.name),
+            panel_x + 10.0,
+            28.0,
+            22.0,
+            WHITE,
+        );
+
+        // Phase
+        draw_text(
+            &format!("{:?} | Mayor #{}", mayor.phase, mayor.mayor_number),
+            panel_x + 10.0,
+            48.0,
+            14.0,
+            Color::new(0.6, 0.7, 0.6, 1.0),
+        );
+
+        // Separator
+        draw_line(panel_x + 10.0, 58.0, panel_x + 290.0, 58.0, 1.0, Color::new(0.3, 0.3, 0.3, 1.0));
+
+        // Log entries (last 7, newest first)
+        let entries = mayor.log.last_n(7);
+        for (i, entry) in entries.iter().enumerate() {
+            let y = 80.0 + i as f32 * 65.0;
+            let opacity = if i == 0 { 1.0 } else { 0.8 - i as f32 * 0.08 };
+            let color = Color::new(1.0, 1.0, 1.0, opacity.max(0.3));
+            let header_color = Color::new(0.6, 0.8, 0.6, opacity.max(0.3));
+
+            draw_text(
+                &format!("{} Year {}, {}", entry.emoji, entry.year, entry.season),
+                panel_x + 10.0,
+                y,
+                13.0,
+                header_color,
+            );
+
+            // Word-wrap the text (simple: truncate at ~35 chars per line)
+            let text = &entry.text;
+            if text.len() > 38 {
+                draw_text(&text[..38], panel_x + 10.0, y + 16.0, 14.0, color);
+                let rest = if text.len() > 76 { &text[38..76] } else { &text[38..] };
+                draw_text(rest, panel_x + 10.0, y + 30.0, 14.0, color);
+            } else {
+                draw_text(text, panel_x + 10.0, y + 16.0, 14.0, color);
+            }
+        }
+
         // Controls hint
         draw_text(
-            "Scroll: zoom | Drag: pan | 1-4: speed",
-            screen_width() - 320.0,
-            42.0,
+            "1-4: speed | Scroll: zoom | Drag: pan",
+            10.0,
+            screen_height() - 10.0,
             14.0,
-            Color::new(0.5, 0.5, 0.5, 1.0),
+            Color::new(0.4, 0.4, 0.4, 1.0),
         );
 
         // FPS
         draw_text(
             &format!("FPS: {}", get_fps()),
-            screen_width() - 100.0,
-            20.0,
+            panel_x + 220.0,
+            screen_height() - 10.0,
             14.0,
-            Color::new(0.5, 0.5, 0.5, 1.0),
+            Color::new(0.4, 0.4, 0.4, 1.0),
         );
 
         next_frame().await;
