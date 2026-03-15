@@ -27,8 +27,14 @@ impl StartScreenState {
     }
 }
 
-/// Draw the title screen. Returns Some(StartPhase::MayorSelect) when player presses Enter/clicks.
-pub fn draw_title(state: &mut StartScreenState, dt: f32) -> Option<StartPhase> {
+/// Title screen result.
+pub enum TitleAction {
+    NewGame,
+    LoadGame,
+}
+
+/// Draw the title screen. Returns Some action when player makes a choice.
+pub fn draw_title(state: &mut StartScreenState, dt: f32) -> Option<TitleAction> {
     state.title_pulse += dt * 2.0;
 
     clear_background(Color::new(0.05, 0.08, 0.04, 1.0));
@@ -61,29 +67,53 @@ pub fn draw_title(state: &mut StartScreenState, dt: f32) -> Option<StartPhase> {
         Color::new(0.5, 0.6, 0.5, 0.8),
     );
 
-    // Prompt
-    let blink = if (state.title_pulse * 1.5).sin() > 0.0 { 1.0 } else { 0.4 };
-    let prompt = "Press ENTER or CLICK to begin";
-    let prompt_w = measure_text(prompt, None, 22, 1.0).width;
-    draw_text(
-        prompt,
-        cx - prompt_w / 2.0,
-        sh * 0.65,
-        22.0,
-        Color::new(0.6, 0.8, 0.6, blink),
-    );
+    // New Game button
+    let btn_w = 220.0;
+    let btn_h = 38.0;
+    let btn_x = cx - btn_w / 2.0;
+    let new_y = sh * 0.55;
+    let (mx, my) = mouse_position();
+
+    let new_hover = mx >= btn_x && mx <= btn_x + btn_w && my >= new_y && my <= new_y + btn_h;
+    draw_rectangle(btn_x, new_y, btn_w, btn_h,
+        if new_hover { Color::new(0.2, 0.4, 0.2, 0.9) } else { Color::new(0.12, 0.25, 0.12, 0.8) });
+    draw_rectangle_lines(btn_x, new_y, btn_w, btn_h, 1.0, Color::new(0.3, 0.6, 0.3, 0.7));
+    let nl = "New Game  [ENTER]";
+    let nw = measure_text(nl, None, 18, 1.0).width;
+    draw_text(nl, btn_x + btn_w / 2.0 - nw / 2.0, new_y + 25.0, 18.0,
+        Color::new(0.7, 1.0, 0.7, 1.0));
+
+    // Continue button (only if save exists)
+    let has_save = crate::game::save_exists();
+    if has_save {
+        let cont_y = new_y + 50.0;
+        let cont_hover = mx >= btn_x && mx <= btn_x + btn_w && my >= cont_y && my <= cont_y + btn_h;
+        draw_rectangle(btn_x, cont_y, btn_w, btn_h,
+            if cont_hover { Color::new(0.2, 0.35, 0.4, 0.9) } else { Color::new(0.12, 0.2, 0.25, 0.8) });
+        draw_rectangle_lines(btn_x, cont_y, btn_w, btn_h, 1.0, Color::new(0.3, 0.5, 0.6, 0.7));
+        let cl = "Continue";
+        let cw = measure_text(cl, None, 18, 1.0).width;
+        draw_text(cl, btn_x + btn_w / 2.0 - cw / 2.0, cont_y + 25.0, 18.0,
+            Color::new(0.7, 0.9, 1.0, 1.0));
+
+        if cont_hover && is_mouse_button_pressed(MouseButton::Left) {
+            return Some(TitleAction::LoadGame);
+        }
+    }
 
     // Version
     draw_text(
-        "v0.6.0",
+        "v1.0.0",
         sw - 70.0,
         sh - 10.0,
         14.0,
         Color::new(0.3, 0.3, 0.3, 1.0),
     );
 
-    if is_key_pressed(KeyCode::Enter) || is_mouse_button_pressed(MouseButton::Left) {
-        return Some(StartPhase::MayorSelect);
+    if is_key_pressed(KeyCode::Enter)
+        || (new_hover && is_mouse_button_pressed(MouseButton::Left))
+    {
+        return Some(TitleAction::NewGame);
     }
     None
 }

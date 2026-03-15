@@ -1,5 +1,6 @@
 mod audio;
 mod config;
+mod game;
 mod grid;
 mod influence;
 mod mayor;
@@ -75,6 +76,12 @@ async fn main() {
     let mut conversation_history = mayor::llm::ConversationHistory::default();
     let mut pending_audience_text = String::new();
 
+    // Auto-save + debug
+    let mut autosave_timer: f32 = 0.0;
+    const AUTOSAVE_INTERVAL: f32 = 60.0;
+    let mut save_status: Option<(String, f32)> = None; // (message, display_timer)
+    let mut debug_mode = std::env::args().any(|a| a == "--debug");
+
     loop {
         let dt = get_frame_time();
 
@@ -82,8 +89,56 @@ async fn main() {
             GameState::StartScreen(phase) => {
                 match phase {
                     StartPhase::Title => {
-                        if let Some(next) = ui::start_screen::draw_title(&mut start_screen, dt) {
-                            game_state = GameState::StartScreen(next);
+                        if let Some(action) = ui::start_screen::draw_title(&mut start_screen, dt) {
+                            match action {
+                                ui::start_screen::TitleAction::NewGame => {
+                                    game_state = GameState::StartScreen(StartPhase::MayorSelect);
+                                }
+                                ui::start_screen::TitleAction::LoadGame => {
+                                    match game::load_game() {
+                                        Ok(save) => {
+                                            config = save.config;
+                                            grid = save.grid;
+                                            next_grid = grid.clone();
+                                            mayor = save.mayor;
+                                            funds = save.funds;
+                                            tick_count = save.tick_count;
+                                            influence_state = save.influence;
+                                            monument_sting_played = save.monument_sting_played;
+                                            speed_idx = save.speed_idx;
+                                            stats = CityStats::compute(&grid);
+                                            rng = SmallRng::seed_from_u64(tick_count);
+                                            tick_timer = 0.0;
+                                            influence_modal = InfluenceModal::None;
+                                            response_toast = None;
+                                            response_timer = 0.0;
+                                            last_phase_str = format!("{:?}", mayor.phase);
+                                            council_candidates = None;
+                                            llm_request = None;
+                                            conversation_history = mayor::llm::ConversationHistory::default();
+                                            pending_audience_text.clear();
+                                            autosave_timer = 0.0;
+
+                                            let initial_center = vec2(0.0, (config.grid_height as f32) * TILE_H / 2.0);
+                                            camera = GameCamera::new(initial_center);
+                                            day_night = DayNightCycle::new();
+                                            particles = ParticleSystem::new();
+
+                                            audio_mgr = AudioManager::new();
+                                            audio_mgr.load_local_tracks().await;
+                                            if audio_mgr.spotify.available {
+                                                audio_mgr.backend = audio::AudioBackend::Spotify;
+                                            }
+
+                                            save_status = Some(("Game loaded!".to_string(), 2.0));
+                                            game_state = GameState::Playing;
+                                        }
+                                        Err(e) => {
+                                            save_status = Some((format!("Load failed: {}", e), 3.0));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     StartPhase::MayorSelect => {
@@ -140,6 +195,18 @@ async fn main() {
 
             GameState::Playing => {
                 let modal_open = !matches!(influence_modal, InfluenceModal::None);
+
+                // ESC → Pause (only when no modal)
+                if !modal_open && is_key_pressed(KeyCode::Escape) {
+                    game_state = GameState::Paused;
+                    next_frame().await;
+                    continue;
+                }
+
+                // F12 → Toggle debug mode
+                if is_key_pressed(KeyCode::F12) {
+                    debug_mode = !debug_mode;
+                }
 
                 // --- Input (only when no modal) ---
                 if !modal_open {
@@ -466,6 +533,143 @@ async fn main() {
                         _ => {}
                     }
                 }
+
+                // --- Auto-save ---
+                autosave_timer += dt;
+                if autosave_timer >= AUTOSAVE_INTERVAL {
+                    autosave_timer = 0.0;
+                    let save = game::SaveState::new(
+                        &grid, &mayor, &influence_state, &config,
+                        funds, tick_count, monument_sting_played, speed_idx,
+                    );
+                    match game::save_game(&save) {
+                        Ok(()) => save_status = Some(("Auto-saved".to_string(), 2.0)),
+                        Err(e) => save_status = Some((format!("Save failed: {}", e), 3.0)),
+                    }
+                }
+
+                // Save status toast
+                if let Some((ref msg, ref mut timer)) = save_status {
+                    if *timer > 0.0 {
+                        let alpha = (*timer / 2.0).min(1.0);
+                        draw_text(
+                            msg,
+                            10.0,
+                            screen_height() - 50.0,
+                            14.0,
+                            Color::new(0.5, 0.7, 0.5, alpha),
+                        );
+                        *timer -= dt;
+                    }
+                }
+
+                // --- Debug overlay ---
+                if debug_mode {
+                    draw_debug_overlay(&grid, &stats, &camera, tick_count, &config);
+                }
+            }
+
+            GameState::Paused => {
+                // Still draw the world (frozen)
+                set_camera(&camera.to_macroquad_camera());
+                clear_background(Color::new(0.08, 0.10, 0.06, 1.0));
+                renderer::draw_world(&grid, &camera, &day_night, &particles, tick_count);
+
+                set_default_camera();
+
+                // Draw HUD (frozen)
+                let year = tick_count / config.ticks_per_year as u64 + 1;
+                let season = mayor::narration::season_name(tick_count, config.ticks_per_season);
+                ui::stats::draw_hud(
+                    &stats, funds, year, season, speed_levels[speed_idx],
+                    &day_night, mayor.phase, &audio_mgr.current_mood_label,
+                );
+                ui::mayor_log::draw_mayor_panel(&mayor);
+
+                // Darkened overlay
+                let sw = screen_width();
+                let sh = screen_height();
+                draw_rectangle(0.0, 0.0, sw, sh, Color::new(0.0, 0.0, 0.0, 0.5));
+
+                // Pause menu
+                let menu_w = 300.0;
+                let menu_h = 220.0;
+                let menu_x = sw / 2.0 - menu_w / 2.0;
+                let menu_y = sh / 2.0 - menu_h / 2.0;
+
+                draw_rectangle(menu_x, menu_y, menu_w, menu_h, Color::new(0.06, 0.09, 0.06, 0.95));
+                draw_rectangle_lines(menu_x, menu_y, menu_w, menu_h, 2.0, Color::new(0.3, 0.5, 0.3, 0.8));
+
+                let title = "PAUSED";
+                let tw = measure_text(title, None, 32, 1.0).width;
+                draw_text(title, menu_x + menu_w / 2.0 - tw / 2.0, menu_y + 40.0, 32.0,
+                    Color::new(0.7, 0.95, 0.7, 1.0));
+
+                let (mx, my) = mouse_position();
+                let btn_w = 200.0;
+                let btn_h = 36.0;
+                let btn_x = menu_x + menu_w / 2.0 - btn_w / 2.0;
+
+                // Resume button
+                let resume_y = menu_y + 70.0;
+                let resume_hover = mx >= btn_x && mx <= btn_x + btn_w && my >= resume_y && my <= resume_y + btn_h;
+                draw_rectangle(btn_x, resume_y, btn_w, btn_h,
+                    if resume_hover { Color::new(0.2, 0.4, 0.2, 0.9) } else { Color::new(0.12, 0.25, 0.12, 0.8) });
+                let rl = "Resume [ESC]";
+                let rw = measure_text(rl, None, 18, 1.0).width;
+                draw_text(rl, btn_x + btn_w / 2.0 - rw / 2.0, resume_y + 24.0, 18.0,
+                    Color::new(0.7, 1.0, 0.7, 1.0));
+
+                // Save button
+                let save_y = resume_y + 46.0;
+                let save_hover = mx >= btn_x && mx <= btn_x + btn_w && my >= save_y && my <= save_y + btn_h;
+                draw_rectangle(btn_x, save_y, btn_w, btn_h,
+                    if save_hover { Color::new(0.2, 0.35, 0.4, 0.9) } else { Color::new(0.12, 0.2, 0.25, 0.8) });
+                let sl = "Save Game";
+                let slw = measure_text(sl, None, 18, 1.0).width;
+                draw_text(sl, btn_x + btn_w / 2.0 - slw / 2.0, save_y + 24.0, 18.0,
+                    Color::new(0.7, 0.9, 1.0, 1.0));
+
+                // Quit to menu button
+                let quit_y = save_y + 46.0;
+                let quit_hover = mx >= btn_x && mx <= btn_x + btn_w && my >= quit_y && my <= quit_y + btn_h;
+                draw_rectangle(btn_x, quit_y, btn_w, btn_h,
+                    if quit_hover { Color::new(0.4, 0.2, 0.2, 0.9) } else { Color::new(0.25, 0.12, 0.12, 0.8) });
+                let ql = "Quit to Menu";
+                let qw = measure_text(ql, None, 18, 1.0).width;
+                draw_text(ql, btn_x + btn_w / 2.0 - qw / 2.0, quit_y + 24.0, 18.0,
+                    Color::new(1.0, 0.7, 0.7, 1.0));
+
+                // Handle clicks
+                if is_key_pressed(KeyCode::Escape)
+                    || (resume_hover && is_mouse_button_pressed(MouseButton::Left))
+                {
+                    game_state = GameState::Playing;
+                }
+                if save_hover && is_mouse_button_pressed(MouseButton::Left) {
+                    let save = game::SaveState::new(
+                        &grid, &mayor, &influence_state, &config,
+                        funds, tick_count, monument_sting_played, speed_idx,
+                    );
+                    match game::save_game(&save) {
+                        Ok(()) => save_status = Some(("Game saved!".to_string(), 2.0)),
+                        Err(e) => save_status = Some((format!("Save failed: {}", e), 3.0)),
+                    }
+                }
+                if quit_hover && is_mouse_button_pressed(MouseButton::Left) {
+                    game_state = GameState::StartScreen(StartPhase::Title);
+                    start_screen = StartScreenState::new();
+                }
+
+                // Show save status in pause menu
+                if let Some((ref msg, ref mut timer)) = save_status {
+                    if *timer > 0.0 {
+                        let alpha = (*timer / 2.0).min(1.0);
+                        draw_text(msg, menu_x + 20.0, menu_y + menu_h - 10.0, 14.0,
+                            Color::new(0.5, 0.8, 0.5, alpha));
+                        *timer -= dt;
+                    }
+                }
             }
         }
 
@@ -660,6 +864,68 @@ fn find_empty_near_development(grid: &grid::Grid, rng: &mut SmallRng) -> Option<
     }
     if candidates.is_empty() { return None; }
     Some(candidates[rng.gen_range(0..candidates.len())])
+}
+
+fn draw_debug_overlay(
+    grid: &grid::Grid,
+    stats: &CityStats,
+    camera: &GameCamera,
+    tick_count: u64,
+    config: &SimConfig,
+) {
+    // Debug panel background
+    draw_rectangle(0.0, 54.0, 320.0, 180.0, Color::new(0.0, 0.0, 0.0, 0.85));
+    draw_rectangle_lines(0.0, 54.0, 320.0, 180.0, 1.0, Color::new(0.5, 0.8, 0.3, 0.6));
+
+    let x = 10.0;
+    let mut y = 72.0;
+    let c = Color::new(0.6, 0.9, 0.4, 0.9);
+    let h = Color::new(0.8, 1.0, 0.5, 1.0);
+
+    draw_text("DEBUG MODE [F12]", x, y, 14.0, h);
+    y += 18.0;
+
+    draw_text(&format!("Tick: {}  Year: {}  Season: {}",
+        tick_count,
+        tick_count / config.ticks_per_year as u64 + 1,
+        mayor::narration::season_name(tick_count, config.ticks_per_season),
+    ), x, y, 12.0, c);
+    y += 16.0;
+
+    draw_text(&format!("Grid: {}x{}  Cells: {}",
+        grid.width, grid.height, grid.width * grid.height,
+    ), x, y, 12.0, c);
+    y += 16.0;
+
+    draw_text(&format!("Developed: {}  Roads: {}  Parks: {}",
+        stats.total_developed, stats.road_count, stats.park_count,
+    ), x, y, 12.0, c);
+    y += 16.0;
+
+    draw_text(&format!("Powered: {}/{}  Watered: {}/{}",
+        stats.powered_zones, stats.total_zones,
+        stats.watered_zones, stats.total_zones,
+    ), x, y, 12.0, c);
+    y += 16.0;
+
+    draw_text(&format!("Camera: ({:.0}, {:.0})  Zoom: {:.2}",
+        camera.target.x, camera.target.y, camera.zoom,
+    ), x, y, 12.0, c);
+    y += 16.0;
+
+    draw_text(&format!("Difficulty: {:?}  Fire spread: {:.0}%",
+        config.difficulty, config.fire_spread_prob * 100.0,
+    ), x, y, 12.0, c);
+    y += 16.0;
+
+    draw_text(&format!("Rubble: {}  Fire: {}  Happiness: {:.2}",
+        stats.rubble_count, stats.fire_count, stats.happiness,
+    ), x, y, 12.0, c);
+    y += 16.0;
+
+    // Cell inspector: show cell under mouse
+    // (Would need screen_to_grid which exists but we'd need camera world coords)
+    draw_text("Hover cells for info (coming soon)", x, y, 11.0, Color::new(0.5, 0.6, 0.4, 0.5));
 }
 
 fn find_road_endpoint(grid: &grid::Grid, rng: &mut SmallRng) -> Option<(usize, usize)> {

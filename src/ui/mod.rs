@@ -12,6 +12,7 @@ use crate::influence::ActionCategory;
 pub enum GameState {
     StartScreen(StartPhase),
     Playing,
+    Paused,
 }
 
 /// Start screen sub-states.
