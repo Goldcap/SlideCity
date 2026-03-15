@@ -54,7 +54,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxkbcommon-dev
+          sudo apt-get install -y libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxkbcommon-dev libudev-dev pkg-config libwayland-dev libxrandr-dev libxinerama-dev libxcursor-dev
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
