@@ -66,15 +66,15 @@ impl SimConfig {
     pub fn new(difficulty: Difficulty) -> Self {
         let (starting_funds, tax_mult, fire_spread, random_fire, decay_mult, cooldown) =
             match difficulty {
-                Difficulty::Peaceful => (100_000, 1.5, 0.14, 0.0003, 0.5, 60.0),
-                Difficulty::Normal => (75_000, 1.0, 0.28, 0.0006, 1.0, 30.0),
-                Difficulty::Harsh => (50_000, 0.7, 0.42, 0.001, 2.0, 15.0),
+                Difficulty::Peaceful => (200_000, 1.5, 0.14, 0.0003, 0.5, 60.0),
+                Difficulty::Normal => (150_000, 1.0, 0.28, 0.0006, 1.0, 30.0),
+                Difficulty::Harsh => (100_000, 0.7, 0.42, 0.001, 2.0, 15.0),
             };
 
         Self {
             difficulty,
-            grid_width: 80,
-            grid_height: 52,
+            grid_width: 128,
+            grid_height: 128,
             base_tick_ms: 800.0,
             ticks_per_year: 200,
             ticks_per_season: 50,
