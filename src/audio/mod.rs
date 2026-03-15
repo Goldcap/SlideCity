@@ -1,4 +1,5 @@
 pub mod mood;
+pub mod sfx;
 pub mod spotify;
 
 use std::collections::HashMap;

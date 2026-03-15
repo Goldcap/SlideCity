@@ -10,6 +10,7 @@ mod ui;
 
 use audio::AudioManager;
 use audio::mood;
+use audio::sfx::{SfxManager, SfxId};
 use config::SimConfig;
 use grid::terrain::generate_terrain;
 use grid::TileType;
@@ -83,8 +84,10 @@ async fn main() {
     let mut save_status: Option<(String, f32)> = None; // (message, display_timer)
     let mut debug_mode = std::env::args().any(|a| a == "--debug");
 
-    // Load sprite atlas (once, persists across game starts)
+    // Load sprite atlas and SFX (once, persists across game starts)
     let sprites = SpriteAtlas::load().await;
+    let mut sfx = SfxManager::new();
+    sfx.load().await;
 
     loop {
         let dt = get_frame_time();
@@ -191,6 +194,10 @@ async fn main() {
                                 audio_mgr.backend = audio::AudioBackend::Spotify;
                             }
 
+                            // Start ambient sounds
+                            sfx.play_ambient(SfxId::AmbientWind);
+                            sfx.play_ambient(SfxId::AmbientBirds);
+
                             game_state = GameState::Playing;
                         }
                     }
@@ -210,6 +217,11 @@ async fn main() {
                 // F12 → Toggle debug mode
                 if is_key_pressed(KeyCode::F12) {
                     debug_mode = !debug_mode;
+                }
+
+                // SFX: rotation whoosh
+                if is_key_pressed(KeyCode::Q) || is_key_pressed(KeyCode::E) {
+                    sfx.play(SfxId::Rotate);
                 }
 
                 // --- Input (only when no modal) ---
@@ -383,6 +395,7 @@ async fn main() {
                 if !modal_open {
                     match panel_action {
                         InfluenceAction::DisasterButton => {
+                            sfx.play(SfxId::FireAlarm);
                             if let Some((col, row)) = find_random_developed(&grid, &mut rng) {
                                 grid.get_mut(col, row).tile = TileType::Fire;
                                 grid.get_mut(col, row).age = 0;
@@ -395,10 +408,12 @@ async fn main() {
                         }
                         InfluenceAction::OpenSuggestion => {
                             if influence_state.can_afford(1) {
+                                sfx.play(SfxId::UiOpen);
                                 influence_modal = InfluenceModal::SuggestionBox;
                             }
                         }
                         InfluenceAction::OpenCouncil => {
+                            sfx.play(SfxId::UiOpen);
                             if influence_state.can_afford(3) {
                                 let candidates = influence::council::generate_candidates(
                                     mayor.personality(), &stats, &mut rng,
@@ -408,6 +423,7 @@ async fn main() {
                             }
                         }
                         InfluenceAction::OpenAudience => {
+                            sfx.play(SfxId::UiOpen);
                             if influence_state.can_afford(5) {
                                 influence_modal = InfluenceModal::Audience {
                                     input: String::new(),
@@ -429,9 +445,11 @@ async fn main() {
 
                     match modal_action {
                         InfluenceAction::CloseModal => {
+                            sfx.play(SfxId::UiClose);
                             influence_modal = InfluenceModal::None;
                         }
                         InfluenceAction::SuggestionPick(action) => {
+                            sfx.play(SfxId::UiClick);
                             if influence_state.spend(1) {
                                 let has_boost = influence_state.compliance_boost > 0;
                                 let response = influence::suggestion::evaluate_suggestion(
@@ -457,6 +475,7 @@ async fn main() {
                             }
                         }
                         InfluenceAction::CouncilPick(idx) => {
+                            sfx.play(SfxId::UiClick);
                             if let Some(candidates) = &council_candidates {
                                 if influence_state.spend(3) {
                                     let choice = candidates[idx];
@@ -485,6 +504,7 @@ async fn main() {
                             }
                         }
                         InfluenceAction::AudienceSubmit(text) => {
+                            sfx.play(SfxId::MayorSpeak);
                             if influence_state.spend(5) {
                                 // Try LLM first, fall back to scripted
                                 let yr = (tick_count / config.ticks_per_year as u64 + 1) as u32;
@@ -529,6 +549,7 @@ async fn main() {
                             }
                         }
                         InfluenceAction::BuyIPConfirm => {
+                            sfx.play(SfxId::CashRegister);
                             if influence_state.buy_ip(&mut funds) {
                                 let p = mayor.personality();
                                 let yr = (tick_count / config.ticks_per_year as u64 + 1) as u32;
