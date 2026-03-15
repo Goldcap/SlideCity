@@ -247,76 +247,67 @@ fn camera_controls(
 fn build_terrain_mesh(grid: &Grid) -> Mesh {
     let w = grid.width;
     let h = grid.height;
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity((w + 1) * (h + 1));
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity((w + 1) * (h + 1));
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity((w + 1) * (h + 1));
-    let mut indices: Vec<u32> = Vec::with_capacity(w * h * 6);
+    // Each cell gets its own 4 vertices (no sharing) for crisp per-cell colors
+    let num_cells = w * h;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(num_cells * 4);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(num_cells * 4);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(num_cells * 4);
+    let mut indices: Vec<u32> = Vec::with_capacity(num_cells * 6);
 
-    // Generate vertices at cell corners (w+1 x h+1)
-    for row in 0..=h {
-        for col in 0..=w {
-            // Sample height from nearest cell
-            let sample_col = col.min(w - 1);
-            let sample_row = row.min(h - 1);
-            let cell = grid.get(sample_col, sample_row);
+    for row in 0..h {
+        for col in 0..w {
+            let cell = grid.get(col, row);
+            let base_idx = (row * w + col) as u32 * 4;
 
-            let height = if cell.tile == TileType::WaterBody {
-                0.0 // Water at sea level
+            let cell_h = if cell.tile == TileType::WaterBody {
+                0.0
             } else {
                 cell.terrain_height * HEIGHT_SCALE
             };
 
-            positions.push([
-                col as f32 * TILE_SIZE,
-                height,
-                row as f32 * TILE_SIZE,
-            ]);
+            // Sample neighbor heights for corners (average with adjacent cells)
+            let h_tl = corner_height(grid, col, row, HEIGHT_SCALE);
+            let h_tr = corner_height(grid, col + 1, row, HEIGHT_SCALE);
+            let h_bl = corner_height(grid, col, row + 1, HEIGHT_SCALE);
+            let h_br = corner_height(grid, col + 1, row + 1, HEIGHT_SCALE);
 
-            normals.push([0.0, 1.0, 0.0]); // Will recompute
+            let x = col as f32 * TILE_SIZE;
+            let z = row as f32 * TILE_SIZE;
 
-            // Vertex color from terrain type
+            // 4 corners: TL, TR, BL, BR
+            positions.push([x, h_tl, z]);
+            positions.push([x + TILE_SIZE, h_tr, z]);
+            positions.push([x, h_bl, z + TILE_SIZE]);
+            positions.push([x + TILE_SIZE, h_br, z + TILE_SIZE]);
+
+            // Flat normal for the cell (computed from the quad)
+            let p0 = Vec3::new(x, h_tl, z);
+            let p1 = Vec3::new(x + TILE_SIZE, h_tr, z);
+            let p2 = Vec3::new(x, h_bl, z + TILE_SIZE);
+            let normal = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+            let n = [normal.x, normal.y, normal.z];
+            normals.push(n);
+            normals.push(n);
+            normals.push(n);
+            normals.push(n);
+
+            // Same color for all 4 vertices = crisp per-cell coloring
             let (r, g, b) = terrain_color(cell);
-            colors.push([r, g, b, 1.0]);
+            let color = [r, g, b, 1.0];
+            colors.push(color);
+            colors.push(color);
+            colors.push(color);
+            colors.push(color);
+
+            // Two triangles: TL-BL-TR, TR-BL-BR
+            indices.push(base_idx);
+            indices.push(base_idx + 2);
+            indices.push(base_idx + 1);
+
+            indices.push(base_idx + 1);
+            indices.push(base_idx + 2);
+            indices.push(base_idx + 3);
         }
-    }
-
-    // Generate triangles (two per cell)
-    let stride = (w + 1) as u32;
-    for row in 0..h as u32 {
-        for col in 0..w as u32 {
-            let tl = row * stride + col;
-            let tr = tl + 1;
-            let bl = (row + 1) * stride + col;
-            let br = bl + 1;
-
-            // Two triangles per quad
-            indices.push(tl);
-            indices.push(bl);
-            indices.push(tr);
-
-            indices.push(tr);
-            indices.push(bl);
-            indices.push(br);
-        }
-    }
-
-    // Compute smooth normals
-    let mut normal_accum: Vec<Vec3> = vec![Vec3::ZERO; positions.len()];
-    for tri in indices.chunks(3) {
-        let i0 = tri[0] as usize;
-        let i1 = tri[1] as usize;
-        let i2 = tri[2] as usize;
-        let p0 = Vec3::from(positions[i0]);
-        let p1 = Vec3::from(positions[i1]);
-        let p2 = Vec3::from(positions[i2]);
-        let normal = (p1 - p0).cross(p2 - p0).normalize_or_zero();
-        normal_accum[i0] += normal;
-        normal_accum[i1] += normal;
-        normal_accum[i2] += normal;
-    }
-    for (i, n) in normal_accum.iter().enumerate() {
-        let normalized = n.normalize_or_zero();
-        normals[i] = [normalized.x, normalized.y, normalized.z];
     }
 
     Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
@@ -324,6 +315,29 @@ fn build_terrain_mesh(grid: &Grid) -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
         .with_inserted_indices(Indices::U32(indices))
+}
+
+/// Average height at a grid corner (shared by up to 4 cells).
+fn corner_height(grid: &Grid, col: usize, row: usize, scale: f32) -> f32 {
+    let mut sum = 0.0;
+    let mut count = 0.0;
+    // Sample up to 4 adjacent cells
+    for dr in [0usize.wrapping_sub(1), 0] {
+        for dc in [0usize.wrapping_sub(1), 0] {
+            let c = col.wrapping_add(dc);
+            let r = row.wrapping_add(dr);
+            if c < grid.width && r < grid.height {
+                let cell = grid.get(c, r);
+                if cell.tile == TileType::WaterBody {
+                    sum += 0.0;
+                } else {
+                    sum += cell.terrain_height * scale;
+                }
+                count += 1.0;
+            }
+        }
+    }
+    if count > 0.0 { sum / count } else { 0.0 }
 }
 
 fn terrain_color(cell: &grid::Cell) -> (f32, f32, f32) {
@@ -402,19 +416,21 @@ fn update_terrain_mesh(
     }
 
     if let Some(mesh) = meshes.get_mut(&terrain_handle.0) {
-        // Update vertex colors to reflect new tile states
         let grid = &grid_res.grid;
         let w = grid.width;
         let h = grid.height;
-        let mut colors: Vec<[f32; 4]> = Vec::with_capacity((w + 1) * (h + 1));
+        // 4 vertices per cell, same color for all 4
+        let mut colors: Vec<[f32; 4]> = Vec::with_capacity(w * h * 4);
 
-        for row in 0..=h {
-            for col in 0..=w {
-                let sample_col = col.min(w - 1);
-                let sample_row = row.min(h - 1);
-                let cell = grid.get(sample_col, sample_row);
+        for row in 0..h {
+            for col in 0..w {
+                let cell = grid.get(col, row);
                 let (r, g, b) = terrain_color(cell);
-                colors.push([r, g, b, 1.0]);
+                let color = [r, g, b, 1.0];
+                colors.push(color);
+                colors.push(color);
+                colors.push(color);
+                colors.push(color);
             }
         }
 
