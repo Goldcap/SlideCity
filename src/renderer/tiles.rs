@@ -19,11 +19,14 @@ pub fn draw_cell_tinted(
     let elev_offset = cell.terrain_height * TERRAIN_ELEV_SCALE;
     let elevated_pos = vec2(screen_pos.x, screen_pos.y - elev_offset);
 
-    // Try sprite first, fall back to colored rects
+    // Always draw the colored diamond base first (fills gaps between tiles)
+    draw_cell_base_diamond(cell, elevated_pos, utility_dim, tint);
+
+    // Overlay sprite on top if available, otherwise draw full fallback details
     if let Some(tex) = sprites.get_for_cell(cell) {
         draw_cell_sprite(cell, elevated_pos, utility_dim, pop_in_scale, tint, tex);
     } else {
-        draw_cell_fallback(cell, elevated_pos, utility_dim, pop_in_scale, tint);
+        draw_cell_fallback_details(cell, elevated_pos, utility_dim, pop_in_scale, tint);
     }
 }
 
@@ -74,16 +77,13 @@ fn draw_cell_sprite(
     );
 }
 
-/// Fallback: draw a cell using colored geometric primitives (original renderer).
-fn draw_cell_fallback(
+/// Draw just the isometric diamond base (gap filler + solid ground color).
+fn draw_cell_base_diamond(
     cell: &Cell,
     screen_pos: Vec2,
     utility_dim: f32,
-    pop_in_scale: f32,
     tint: Color,
 ) {
-    let height = cell.tile.height_floors(cell.age);
-
     let (r, g, b) = if cell.tile == TileType::Empty {
         cell.terrain_type.color()
     } else {
@@ -103,7 +103,6 @@ fn draw_cell_fallback(
     let cx = screen_pos.x;
     let cy = screen_pos.y;
 
-    // Isometric diamond
     let top = vec2(cx, cy - hh);
     let right = vec2(cx + hw, cy);
     let bottom = vec2(cx, cy + hh);
@@ -140,6 +139,30 @@ fn draw_cell_fallback(
             draw_triangle(bl, bl2, bb2, darker);
         }
     }
+}
+
+/// Fallback details: trees, water shimmer, buildings, labels (when no sprite).
+fn draw_cell_fallback_details(
+    cell: &Cell,
+    screen_pos: Vec2,
+    utility_dim: f32,
+    pop_in_scale: f32,
+    tint: Color,
+) {
+    let height = cell.tile.height_floors(cell.age);
+
+    let (r, g, b) = if cell.tile == TileType::Empty {
+        cell.terrain_type.color()
+    } else {
+        cell.tile.color()
+    };
+
+    let hw = TILE_W / 2.0;
+    let hh = TILE_H / 2.0;
+    let cx = screen_pos.x;
+    let cy = screen_pos.y;
+
+    // Base diamond + elevation sides already drawn by draw_cell_base_diamond
 
     // Trees
     if cell.tile == TileType::Empty && cell.terrain_type.has_trees() {
