@@ -2,6 +2,7 @@ pub mod camera;
 pub mod iso;
 pub mod lighting;
 pub mod particles;
+pub mod sprites;
 pub mod tiles;
 
 use macroquad::prelude::*;
@@ -11,6 +12,7 @@ use camera::GameCamera;
 use iso::grid_to_screen;
 use lighting::DayNightCycle;
 use particles::ParticleSystem;
+use sprites::SpriteAtlas;
 
 /// Draw the entire grid in isometric view with painter's algorithm.
 pub fn draw_world(
@@ -19,6 +21,7 @@ pub fn draw_world(
     day_night: &DayNightCycle,
     particles: &ParticleSystem,
     _tick_count: u64,
+    sprites: &SpriteAtlas,
 ) {
     let tint = day_night.tint();
 
@@ -60,16 +63,13 @@ pub fn draw_world(
                     | TileType::Monument
             )
         {
-            // Use tick_count fractional part for sub-tick smoothness
             let progress = cell.age as f32 / 2.0;
             ease_out_back(progress.min(1.0))
         } else {
             1.0
         };
 
-        // Apply day/night tint by modulating the tile drawing
-        // (tiles module handles the actual drawing)
-        tiles::draw_cell_tinted(cell, pos, utility_dim, pop_in, tint);
+        tiles::draw_cell_tinted(cell, pos, utility_dim, pop_in, tint, sprites);
     }
 
     // Draw particles on top of world

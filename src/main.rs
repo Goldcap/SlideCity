@@ -20,6 +20,7 @@ use renderer::camera::GameCamera;
 use renderer::iso::{grid_to_screen, TILE_H};
 use renderer::lighting::DayNightCycle;
 use renderer::particles::ParticleSystem;
+use renderer::sprites::SpriteAtlas;
 use sim::stats::CityStats;
 use ui::{GameState, InfluenceModal, StartPhase};
 use ui::influence_ui::InfluenceAction;
@@ -81,6 +82,9 @@ async fn main() {
     const AUTOSAVE_INTERVAL: f32 = 60.0;
     let mut save_status: Option<(String, f32)> = None; // (message, display_timer)
     let mut debug_mode = std::env::args().any(|a| a == "--debug");
+
+    // Load sprite atlas (once, persists across game starts)
+    let sprites = SpriteAtlas::load().await;
 
     loop {
         let dt = get_frame_time();
@@ -331,7 +335,7 @@ async fn main() {
                 // --- Draw world ---
                 set_camera(&camera.to_macroquad_camera());
                 clear_background(Color::new(0.08, 0.10, 0.06, 1.0));
-                renderer::draw_world(&grid, &camera, &day_night, &particles, tick_count);
+                renderer::draw_world(&grid, &camera, &day_night, &particles, tick_count, &sprites);
 
                 // --- UI (screen space) ---
                 set_default_camera();
@@ -573,7 +577,7 @@ async fn main() {
                 // Still draw the world (frozen)
                 set_camera(&camera.to_macroquad_camera());
                 clear_background(Color::new(0.08, 0.10, 0.06, 1.0));
-                renderer::draw_world(&grid, &camera, &day_night, &particles, tick_count);
+                renderer::draw_world(&grid, &camera, &day_night, &particles, tick_count, &sprites);
 
                 set_default_camera();
 
