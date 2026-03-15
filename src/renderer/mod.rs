@@ -17,20 +17,22 @@ use sprites::SpriteAtlas;
 /// Draw the entire grid in isometric view with painter's algorithm.
 pub fn draw_world(
     grid: &Grid,
-    _camera: &GameCamera,
+    camera: &GameCamera,
     day_night: &DayNightCycle,
     particles: &ParticleSystem,
     _tick_count: u64,
     sprites: &SpriteAtlas,
 ) {
     let tint = day_night.tint();
+    let rot = camera.rotation;
 
-    // Build sorted draw order: (depth, row, col)
+    // Build sorted draw order using rotated coordinates for correct depth
     let mut draw_order: Vec<(usize, usize, usize)> =
         Vec::with_capacity(grid.width * grid.height);
     for row in 0..grid.height {
         for col in 0..grid.width {
-            draw_order.push((col + row, row, col));
+            let (rc, rr) = rot.transform(col, row, grid.width, grid.height);
+            draw_order.push((rc + rr, row, col));
         }
     }
     draw_order.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
@@ -38,7 +40,10 @@ pub fn draw_world(
     for &(_, row, col) in &draw_order {
         let cell = grid.get(col, row);
         let height = cell.tile.height_floors(cell.age);
-        let pos = grid_to_screen(col, row, height);
+
+        // Project using rotated coordinates
+        let (rc, rr) = rot.transform(col, row, grid.width, grid.height);
+        let pos = grid_to_screen(rc, rr, height);
 
         // Utility dimming for unpowered/unwatered zone cells
         let utility_dim = if matches!(
@@ -51,7 +56,7 @@ pub fn draw_world(
             1.0
         };
 
-        // Pop-in animation: scale 0→1 over first few ticks (age 0-1)
+        // Pop-in animation
         let pop_in = if cell.age <= 1
             && matches!(
                 cell.tile,

@@ -245,11 +245,15 @@ async fn main() {
 
                             mayor.decide(&mut grid, &stats, &config, &mut funds, tick_count, &mut rng);
 
-                            if let Some((x, y)) = mayor.camera_request.take() {
-                                camera.pan_to(vec2(x, y));
+                            if let Some((col, row)) = mayor.camera_request.take() {
+                                let (rc, rr) = camera.rotation.transform(col, row, grid.width, grid.height);
+                                let pos = grid_to_screen(rc, rr, 0.0);
+                                camera.pan_to(vec2(pos.x, pos.y));
                             }
-                            if let Some((x, y)) = mayor.shake_request.take() {
-                                camera.shake_at(vec2(x, y), 5.0, 0.5);
+                            if let Some((col, row)) = mayor.shake_request.take() {
+                                let (rc, rr) = camera.rotation.transform(col, row, grid.width, grid.height);
+                                let pos = grid_to_screen(rc, rr, 0.0);
+                                camera.shake_at(vec2(pos.x, pos.y), 5.0, 0.5);
                             }
                         }
 
@@ -366,8 +370,7 @@ async fn main() {
                 // Minimap
                 if !modal_open {
                     if let Some((col, row)) = ui::minimap::draw_minimap(&grid, &camera) {
-                        let pos = grid_to_screen(col, row, 0.0);
-                        camera.pan_to(vec2(pos.x, pos.y));
+                        pan_to_rotated(&mut camera, col, row, grid.width, grid.height);
                     }
                 }
 
@@ -385,7 +388,8 @@ async fn main() {
                                 grid.get_mut(col, row).age = 0;
                                 influence_state.disaster_triggered();
                                 influence_state.disaster_cooldown = config.disaster_cooldown_secs;
-                                let pos = grid_to_screen(col, row, 0.0);
+                                let (rc, rr) = camera.rotation.transform(col, row, grid.width, grid.height);
+                                let pos = grid_to_screen(rc, rr, 0.0);
                                 camera.shake_at(vec2(pos.x, pos.y), 5.0, 0.5);
                             }
                         }
@@ -699,7 +703,7 @@ fn execute_influence_action(
                 let placed = sim::growth::grow_blob(grid, col, row, TileType::Park, size, rng);
                 if placed > 0 {
                     *funds -= p.modify_cost(300, false, true, false);
-                    pan_to(camera, col, row);
+                    pan_to_rotated(camera, col, row, grid.width, grid.height);
                 }
             }
         }
@@ -709,7 +713,7 @@ fn execute_influence_action(
                 let placed = sim::growth::grow_blob(grid, col, row, TileType::Residential, size, rng);
                 if placed > 0 {
                     *funds -= p.modify_cost(200, false, false, false);
-                    pan_to(camera, col, row);
+                    pan_to_rotated(camera, col, row, grid.width, grid.height);
                 }
             }
         }
@@ -719,7 +723,7 @@ fn execute_influence_action(
                 let placed = sim::growth::grow_blob(grid, col, row, TileType::Commercial, size, rng);
                 if placed > 0 {
                     *funds -= p.modify_cost(500, false, false, false);
-                    pan_to(camera, col, row);
+                    pan_to_rotated(camera, col, row, grid.width, grid.height);
                 }
             }
         }
@@ -729,7 +733,7 @@ fn execute_influence_action(
                 let placed = sim::growth::grow_blob(grid, col, row, TileType::Industrial, size, rng);
                 if placed > 0 {
                     *funds -= p.modify_cost(800, false, false, false);
-                    pan_to(camera, col, row);
+                    pan_to_rotated(camera, col, row, grid.width, grid.height);
                 }
             }
         }
@@ -758,7 +762,7 @@ fn execute_influence_action(
                         break;
                     }
                 }
-                pan_to(camera, col, row);
+                pan_to_rotated(camera, col, row, grid.width, grid.height);
             }
         }
     }
@@ -803,7 +807,7 @@ fn extend_utility_player(
                     }
                 }
                 if placed > 0 {
-                    pan_to(camera, col, row);
+                    pan_to_rotated(camera, col, row, grid.width, grid.height);
                 }
                 return;
             }
@@ -811,8 +815,9 @@ fn extend_utility_player(
     }
 }
 
-fn pan_to(camera: &mut GameCamera, col: usize, row: usize) {
-    let pos = grid_to_screen(col, row, 0.0);
+fn pan_to_rotated(camera: &mut GameCamera, col: usize, row: usize, grid_w: usize, grid_h: usize) {
+    let (rc, rr) = camera.rotation.transform(col, row, grid_w, grid_h);
+    let pos = grid_to_screen(rc, rr, 0.0);
     camera.pan_to(vec2(pos.x, pos.y));
 }
 

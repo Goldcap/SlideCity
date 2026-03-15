@@ -2,9 +2,58 @@ use macroquad::prelude::*;
 
 pub const ZOOM_LEVELS: &[f32] = &[0.5, 0.75, 1.0, 1.5, 2.0];
 
+/// Isometric rotation direction (4 compass views).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rotation {
+    North = 0, // Default: top-left corner at top
+    East = 1,  // Rotated 90° clockwise
+    South = 2, // Rotated 180°
+    West = 3,  // Rotated 270°
+}
+
+impl Rotation {
+    pub fn rotate_cw(self) -> Self {
+        match self {
+            Rotation::North => Rotation::East,
+            Rotation::East => Rotation::South,
+            Rotation::South => Rotation::West,
+            Rotation::West => Rotation::North,
+        }
+    }
+
+    pub fn rotate_ccw(self) -> Self {
+        match self {
+            Rotation::North => Rotation::West,
+            Rotation::East => Rotation::North,
+            Rotation::South => Rotation::East,
+            Rotation::West => Rotation::South,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Rotation::North => "N",
+            Rotation::East => "E",
+            Rotation::South => "S",
+            Rotation::West => "W",
+        }
+    }
+
+    /// Transform grid (col, row) to rotated coordinates for isometric projection.
+    pub fn transform(self, col: usize, row: usize, width: usize, height: usize) -> (usize, usize) {
+        match self {
+            Rotation::North => (col, row),
+            Rotation::East => (height - 1 - row, col),
+            Rotation::South => (width - 1 - col, height - 1 - row),
+            Rotation::West => (row, width - 1 - col),
+        }
+    }
+}
+
 pub struct GameCamera {
     pub target: Vec2,
     pub zoom: f32,
+    pub rotation: Rotation,
     target_target: Vec2,
     target_zoom: f32,
 
@@ -25,6 +74,7 @@ impl GameCamera {
         Self {
             target: initial_target,
             zoom: 0.75,
+            rotation: Rotation::North,
             target_target: initial_target,
             target_zoom: 0.75,
             shake_intensity: 0.0,
@@ -60,6 +110,14 @@ impl GameCamera {
     }
 
     pub fn handle_input(&mut self, dt: f32) {
+        // Rotation: Q/E keys
+        if is_key_pressed(KeyCode::Q) {
+            self.rotation = self.rotation.rotate_ccw();
+        }
+        if is_key_pressed(KeyCode::E) {
+            self.rotation = self.rotation.rotate_cw();
+        }
+
         // Zoom: scroll wheel
         let (_, wheel_y) = mouse_wheel();
         if wheel_y != 0.0 {

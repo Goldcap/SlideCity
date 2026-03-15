@@ -120,7 +120,7 @@ pub fn draw_influence_panel(
     // Controls hint + FPS
     let hint_y = fire_y + 36.0;
     draw_text(
-        "1-4: speed | Scroll: zoom | Drag: pan",
+        "1-4: speed | Q/E: rotate | Scroll: zoom",
         panel_x + 10.0,
         hint_y,
         12.0,

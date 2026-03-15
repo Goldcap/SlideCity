@@ -6,12 +6,10 @@ pub mod personality;
 
 use ::rand::rngs::SmallRng;
 use ::rand::Rng;
-use macroquad::prelude::Vec2;
 use serde::{Deserialize, Serialize};
 
 use crate::config::SimConfig;
 use crate::grid::{Grid, TileType};
-use crate::renderer::iso::grid_to_screen;
 use crate::sim::growth;
 use crate::sim::stats::CityStats;
 use narration::{season_name, MayorLog, NarrationContext};
@@ -26,14 +24,6 @@ pub enum MayorPhase {
     Evolution, // year 25+
 }
 
-/// Camera action request from the mayor.
-#[derive(Clone, Debug)]
-pub enum CameraRequest {
-    PanTo(Vec2),
-    ShakeAt(Vec2),
-    None,
-}
-
 /// The Virtual Mayor — THE SOUL of the game.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Mayor {
@@ -44,9 +34,9 @@ pub struct Mayor {
     pub monument_built: bool,
     pub mayor_number: u32, // How many mayors have served (for retirement)
     #[serde(skip)]
-    pub camera_request: Option<(f32, f32)>, // world pos to pan to
+    pub camera_request: Option<(usize, usize)>, // grid (col, row) to pan to
     #[serde(skip)]
-    pub shake_request: Option<(f32, f32)>,
+    pub shake_request: Option<(usize, usize)>,
 }
 
 impl Mayor {
@@ -103,8 +93,7 @@ impl Mayor {
 
             // Find a fire cell and shake camera there
             if let Some((col, row)) = find_tile(grid, TileType::Fire) {
-                let pos = grid_to_screen(col, row, 0.0);
-                self.shake_request = Some((pos.x, pos.y));
+                self.shake_request = Some((col, row));
             }
             return; // Don't do anything else during fire
         }
@@ -534,8 +523,7 @@ impl Mayor {
     }
 
     fn pan_to_grid(&mut self, col: usize, row: usize) {
-        let pos = grid_to_screen(col, row, 0.0);
-        self.camera_request = Some((pos.x, pos.y));
+        self.camera_request = Some((col, row));
     }
 }
 
