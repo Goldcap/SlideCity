@@ -1,12 +1,23 @@
 [package]
 name = "slidecity"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Autonomous isometric city simulation"
+description = "Autonomous 3D city simulation"
 
 [dependencies]
-macroquad = { version = "0.4", features = ["audio"] }
+bevy = { version = "0.15", features = ["dynamic_linking"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = { version = "0.8", features = ["small_rng"] }
 ureq = { version = "2", features = ["json"] }
+
+# Fast compile for dev
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# Release without dynamic linking
+[profile.release]
+lto = "thin"
