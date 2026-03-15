@@ -19,13 +19,13 @@ pub fn draw_cell_tinted(
     let elev_offset = cell.terrain_height * TERRAIN_ELEV_SCALE;
     let elevated_pos = vec2(screen_pos.x, screen_pos.y - elev_offset);
 
-    // Always draw the colored diamond base first (fills gaps between tiles)
-    draw_cell_base_diamond(cell, elevated_pos, utility_dim, tint);
-
-    // Overlay sprite on top if available, otherwise draw full fallback details
     if let Some(tex) = sprites.get_for_cell(cell) {
+        // Sprite mode: flat diamond base (no elevation sides) + sprite overlay
+        draw_cell_flat_diamond(cell, elevated_pos, utility_dim, tint);
         draw_cell_sprite(cell, elevated_pos, utility_dim, pop_in_scale, tint, tex);
     } else {
+        // Fallback mode: full diamond with elevation sides + details
+        draw_cell_base_diamond(cell, elevated_pos, utility_dim, tint);
         draw_cell_fallback_details(cell, elevated_pos, utility_dim, pop_in_scale, tint);
     }
 }
@@ -75,6 +75,40 @@ fn draw_cell_sprite(
             ..Default::default()
         },
     );
+}
+
+/// Draw a flat isometric diamond (gap filler only, no elevation sides).
+fn draw_cell_flat_diamond(
+    cell: &Cell,
+    screen_pos: Vec2,
+    utility_dim: f32,
+    tint: Color,
+) {
+    let (r, g, b) = if cell.tile == TileType::Empty {
+        cell.terrain_type.color()
+    } else {
+        cell.tile.color()
+    };
+
+    let shade = 0.75 + cell.terrain_height * 0.25;
+    let color = Color::new(
+        (r * shade * utility_dim * tint.r).min(1.0),
+        (g * shade * utility_dim * tint.g).min(1.0),
+        (b * shade * utility_dim * tint.b).min(1.0),
+        1.0,
+    );
+
+    let hw = TILE_W / 2.0;
+    let hh = TILE_H / 2.0;
+    let cx = screen_pos.x;
+    let cy = screen_pos.y;
+
+    let top = vec2(cx, cy - hh);
+    let right = vec2(cx + hw, cy);
+    let bottom = vec2(cx, cy + hh);
+    let left = vec2(cx - hw, cy);
+    draw_triangle(top, right, bottom, color);
+    draw_triangle(top, left, bottom, color);
 }
 
 /// Draw just the isometric diamond base (gap filler + solid ground color).

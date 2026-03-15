@@ -150,17 +150,21 @@ def gen_roads():
     # Straight road
     img = Image.new("RGBA", (TW, TH), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw_iso_diamond(draw, 0, 0, TW, TH, (90, 90, 90))
-    # Center lane marking
-    draw.line([(TW // 2, 4), (TW // 2, TH - 4)], fill=(200, 200, 80, 255), width=1)
+    draw_iso_diamond(draw, 0, 0, TW, TH, (95, 95, 95))
+    # Subtle darker edges for depth
+    cx, cy = TW // 2, TH // 2
+    draw.line([(cx, 1), (TW - 2, cy)], fill=(75, 75, 75, 255))
+    draw.line([(cx, TH - 2), (1, cy)], fill=(110, 110, 110, 255))
     save(img, "roads", "road_straight.png")
 
     # Crossroad
     img = Image.new("RGBA", (TW, TH), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw_iso_diamond(draw, 0, 0, TW, TH, (90, 90, 90))
-    draw.line([(TW // 2, 4), (TW // 2, TH - 4)], fill=(200, 200, 80, 255), width=1)
-    draw.line([(12, TH // 2), (52, TH // 2)], fill=(200, 200, 80, 255), width=1)
+    draw_iso_diamond(draw, 0, 0, TW, TH, (95, 95, 95))
+    draw.line([(cx, 1), (TW - 2, cy)], fill=(75, 75, 75, 255))
+    draw.line([(cx, TH - 2), (1, cy)], fill=(110, 110, 110, 255))
+    # Subtle center dot
+    draw.ellipse([cx - 1, cy - 1, cx + 1, cy + 1], fill=(80, 80, 80, 255))
     save(img, "roads", "road_cross.png")
 
 
