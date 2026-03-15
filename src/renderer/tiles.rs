@@ -48,16 +48,18 @@ fn draw_cell_sprite(
         1.0,
     );
 
-    // Scale factor for pop-in animation on buildings
     let height = cell.tile.height_floors(cell.age);
     let scale = if height > 0.0 { pop_in_scale } else { 1.0 };
 
-    // Draw position: center the sprite on the isometric tile position
-    // The screen_pos is the center of the isometric diamond
-    let draw_w = tex_w * scale;
-    let draw_h = tex_h * scale;
+    // Constrain sprite to the isometric tile footprint (TILE_W wide).
+    // Scale proportionally: width = TILE_W, height preserves aspect ratio.
+    let aspect = tex_h / tex_w;
+    let draw_w = TILE_W * scale;
+    let draw_h = TILE_W * aspect * scale;
+
+    // Center horizontally on the isometric diamond center.
+    // Anchor bottom of sprite to the bottom of the diamond.
     let draw_x = screen_pos.x - draw_w / 2.0;
-    // Anchor bottom of sprite to the bottom of the isometric diamond
     let draw_y = screen_pos.y + TILE_H / 2.0 - draw_h;
 
     draw_texture_ex(
