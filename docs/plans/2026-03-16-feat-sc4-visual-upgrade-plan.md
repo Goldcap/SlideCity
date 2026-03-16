@@ -289,10 +289,10 @@ DirectionalLight {
 
 **Success criteria:**
 - [ ] GLTF models load and display for each building type/stage
-- [ ] Falls back to colored cubes when GLBs are missing
-- [ ] Correct model selected based on TileType + age stage + style variant
-- [ ] Incremental updates: only changed cells despawn/respawn
-- [ ] Models positioned correctly on terrain (Y follows terrain height)
+- [x] Falls back to colored cubes when GLBs are missing
+- [x] Correct model selected based on TileType + age stage + style variant
+- [x] Incremental updates: only changed cells despawn/respawn
+- [x] Models positioned correctly on terrain (Y follows terrain height)
 - [ ] Performance: building update < 2ms per sim tick with ~5,000 buildings
 - [ ] Shadow distance culling works
 
@@ -511,8 +511,8 @@ assets/textures/terrain_atlas.png
 - [x] **P1:** Camera target clamped to grid bounds
 - [x] **P2:** Terrain renders with texture atlas when available, vertex colors as fallback
 - [x] **P2:** Terrain transition tiles at type boundaries
-- [ ] **P3:** GLTF building models per type/stage/variant, cube fallback
-- [ ] **P3:** Incremental building updates (no full despawn/respawn)
+- [x] **P3:** GLTF building models per type/stage/variant, cube fallback
+- [x] **P3:** Incremental building updates (no full despawn/respawn)
 - [ ] **P4:** GLTF trees on forest cells with LOD
 - [ ] **P5:** Full road network mesh with all 16 configurations
 - [ ] **P5:** Road texture when available, gray fallback

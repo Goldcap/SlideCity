@@ -4,7 +4,7 @@ pub mod terrain;
 use serde::{Deserialize, Serialize};
 
 /// Tile types for each cell in the grid.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum TileType {
     Empty,
     Road,

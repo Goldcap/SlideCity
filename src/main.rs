@@ -4,6 +4,7 @@ mod influence;
 mod mayor;
 mod sim;
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use bevy::prelude::*;
@@ -46,6 +47,62 @@ struct TerrainMeshHandle(Handle<Mesh>);
 #[derive(Resource)]
 struct TerrainAtlas {
     loaded: bool,
+}
+
+/// Snapshot of visual-relevant cell fields for dirty-cell diffing.
+/// Shared across terrain, building, and road update systems.
+#[derive(Resource)]
+struct PreviousCellState {
+    /// (tile, age_stage, style) per cell — only these affect visual output
+    cells: Vec<(TileType, u8, u8)>,
+    /// Cells that changed this tick — consumed by rendering systems
+    dirty: HashSet<(usize, usize)>,
+}
+
+impl PreviousCellState {
+    fn from_grid(grid: &Grid) -> Self {
+        let cells = grid.cells.iter().map(|c| {
+            (c.tile, age_stage(c.age), c.style)
+        }).collect();
+        Self { cells, dirty: HashSet::new() }
+    }
+}
+
+/// Map age to visual stage: 0-15 -> 0, 16-45 -> 1, 46+ -> 2
+fn age_stage(age: u8) -> u8 {
+    if age < 16 { 0 } else if age < 46 { 1 } else { 2 }
+}
+
+/// Pre-allocated shared mesh and material handles for cube fallback buildings.
+/// Eliminates the 10K+ handle-per-tick leak in the old update_buildings.
+#[derive(Resource)]
+struct CubeFallbackHandles {
+    /// (tile_type, stage) -> shared cuboid mesh handle
+    meshes: HashMap<(TileType, u8), Handle<Mesh>>,
+    /// tile_type -> shared material handle
+    materials: HashMap<TileType, Handle<StandardMaterial>>,
+}
+
+/// Pre-loaded GLTF scene handles for building models.
+#[derive(Resource)]
+#[allow(dead_code)]
+struct BuildingModelPool {
+    /// (tile_type, stage, variant) -> scene handle
+    models: HashMap<(TileType, u8, u8), Handle<Scene>>,
+    /// True once all handles are confirmed loaded (future: async loading check)
+    loaded: bool,
+    /// True if any model files were found at startup
+    has_models: bool,
+}
+
+// ===== SYSTEM SETS =====
+
+/// Execution order for game systems to prevent one-frame-lag visual artifacts.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+enum GameSet {
+    Sim,
+    DirtyCompute,
+    Render,
 }
 
 // ===== CONSTANTS =====
@@ -266,12 +323,18 @@ fn main() {
             }),
             ..default()
         }))
+        .configure_sets(Update, (
+            GameSet::Sim,
+            GameSet::DirtyCompute.after(GameSet::Sim),
+            GameSet::Render.after(GameSet::DirtyCompute),
+        ))
         .add_systems(Startup, setup)
         .add_systems(Update, (
             camera_controls,
-            simulation_tick,
-            update_terrain_mesh,
-            update_buildings,
+            simulation_tick.in_set(GameSet::Sim),
+            compute_dirty_cells.in_set(GameSet::DirtyCompute),
+            update_terrain_mesh.in_set(GameSet::Render),
+            update_buildings.in_set(GameSet::Render),
         ))
         .run();
 }
@@ -387,7 +450,82 @@ fn setup(
         },
     ));
 
+    // Pre-allocate shared cube mesh/material handles for building fallback
+    // This fixes the 10K+ handle leak in the old per-building allocation
+    let mut cube_meshes: HashMap<(TileType, u8), Handle<Mesh>> = HashMap::new();
+    let mut cube_materials: HashMap<TileType, Handle<StandardMaterial>> = HashMap::new();
+
+    let building_types = [
+        TileType::Residential, TileType::Commercial, TileType::Industrial,
+        TileType::PowerPlant, TileType::WaterTower, TileType::Monument,
+    ];
+    for &tile_type in &building_types {
+        let (r, g, b) = tile_type.color();
+        cube_materials.insert(tile_type, materials.add(StandardMaterial {
+            base_color: Color::srgb(r, g, b),
+            perceptual_roughness: 0.6,
+            ..default()
+        }));
+        // Create a cube mesh per stage (different heights)
+        for stage in 0u8..3 {
+            let age = match stage { 0 => 0, 1 => 20, _ => 50 };
+            let height = tile_type.height_floors(age);
+            if height > 0.0 {
+                let h = height * 0.4;
+                cube_meshes.insert(
+                    (tile_type, stage),
+                    meshes.add(Cuboid::new(0.7, h, 0.7)),
+                );
+            }
+        }
+    }
+
+    // Check for GLTF building models
+    let models_dir = Path::new("assets/models/buildings");
+    let has_models = models_dir.exists();
+    let mut model_pool = HashMap::new();
+
+    if has_models {
+        info!("Building models directory found — loading GLTFs");
+        let zone_dirs = [
+            ("residential", TileType::Residential),
+            ("commercial", TileType::Commercial),
+            ("industrial", TileType::Industrial),
+        ];
+        for (dir_name, tile_type) in &zone_dirs {
+            for stage in 1u8..=3 {
+                for variant in 1u8..=6 {
+                    let path = format!("models/buildings/{}/s{}_v{}.glb", dir_name, stage, variant);
+                    if Path::new("assets").join(&path).exists() {
+                        // Use #Scene0 label to load the first scene from the GLB
+                        let scene_path = format!("{}#Scene0", path);
+                        let handle: Handle<Scene> = asset_server.load(&scene_path);
+                        model_pool.insert((*tile_type, stage - 1, variant - 1), handle);
+                        info!("  Loaded {}", path);
+                    }
+                }
+            }
+        }
+        // Infrastructure models
+        let infra = [
+            ("models/buildings/infrastructure/power_plant.glb", TileType::PowerPlant),
+            ("models/buildings/infrastructure/water_tower.glb", TileType::WaterTower),
+            ("models/buildings/infrastructure/monument.glb", TileType::Monument),
+        ];
+        for (path, tile_type) in &infra {
+            if Path::new("assets").join(path).exists() {
+                let scene_path = format!("{}#Scene0", path);
+                let handle: Handle<Scene> = asset_server.load(&scene_path);
+                model_pool.insert((*tile_type, 0, 0), handle);
+                info!("  Loaded {}", path);
+            }
+        }
+    } else {
+        info!("No building models at assets/models/buildings/ — using cube fallback");
+    }
+
     // Store resources
+    let prev_state = PreviousCellState::from_grid(&grid);
     commands.insert_resource(GameGrid { grid, next_grid });
     commands.insert_resource(GameState {
         config,
@@ -402,6 +540,16 @@ fn setup(
     });
     commands.insert_resource(TerrainMeshHandle(mesh_handle));
     commands.insert_resource(TerrainAtlas { loaded: use_atlas });
+    commands.insert_resource(prev_state);
+    commands.insert_resource(CubeFallbackHandles {
+        meshes: cube_meshes,
+        materials: cube_materials,
+    });
+    commands.insert_resource(BuildingModelPool {
+        models: model_pool,
+        loaded: false,
+        has_models,
+    });
 }
 
 // ===== ORBIT CAMERA =====
@@ -716,7 +864,35 @@ fn update_terrain_mesh(
     }
 }
 
-// ===== BUILDINGS (placeholder — spawn 3D cubes) =====
+// ===== DIRTY CELL TRACKING =====
+
+/// Computes which cells changed visually since last frame.
+/// Runs after simulation_tick (which includes sim + mayor + utilities).
+fn compute_dirty_cells(
+    grid_res: Res<GameGrid>,
+    mut prev_state: ResMut<PreviousCellState>,
+) {
+    prev_state.dirty.clear();
+
+    if !grid_res.is_changed() {
+        return;
+    }
+
+    let grid = &grid_res.grid;
+    for row in 0..grid.height {
+        for col in 0..grid.width {
+            let idx = row * grid.width + col;
+            let cell = &grid.cells[idx];
+            let new_state = (cell.tile, age_stage(cell.age), cell.style);
+            if prev_state.cells[idx] != new_state {
+                prev_state.dirty.insert((col, row));
+                prev_state.cells[idx] = new_state;
+            }
+        }
+    }
+}
+
+// ===== BUILDINGS =====
 
 #[derive(Component)]
 struct BuildingMarker {
@@ -724,49 +900,72 @@ struct BuildingMarker {
     row: usize,
 }
 
+/// Incremental building update: only despawn/respawn buildings for dirty cells.
+/// Uses shared CubeFallbackHandles to avoid per-entity asset allocation.
+/// Will use GLTF models from BuildingModelPool when available.
 fn update_buildings(
     mut commands: Commands,
     grid_res: Res<GameGrid>,
-    game: Res<GameState>,
+    prev_state: Res<PreviousCellState>,
+    cube_handles: Res<CubeFallbackHandles>,
+    model_pool: Res<BuildingModelPool>,
     existing: Query<(Entity, &BuildingMarker)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    if !grid_res.is_changed() {
+    if prev_state.dirty.is_empty() {
         return;
-    }
-
-    // Despawn old buildings
-    for (entity, _) in &existing {
-        commands.entity(entity).despawn();
     }
 
     let grid = &grid_res.grid;
 
-    for row in 0..grid.height {
-        for col in 0..grid.width {
-            let cell = grid.get(col, row);
-            let height = cell.tile.height_floors(cell.age);
-            if height <= 0.0 {
+    // Despawn only buildings on dirty cells
+    for (entity, marker) in &existing {
+        if prev_state.dirty.contains(&(marker.col, marker.row)) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    // Spawn new buildings for dirty cells that now have buildings
+    for &(col, row) in &prev_state.dirty {
+        let cell = grid.get(col, row);
+        let height = cell.tile.height_floors(cell.age);
+        if height <= 0.0 {
+            continue;
+        }
+
+        let stage = age_stage(cell.age);
+        let building_h = height * 0.4;
+        let base_y = cell.terrain_height * HEIGHT_SCALE;
+        let world_x = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+        let world_z = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+
+        // Try GLTF model first
+        let variant = cell.style;
+        if model_pool.has_models {
+            // Try exact variant, then fall back to variant 0
+            let model = model_pool.models.get(&(cell.tile, stage, variant))
+                .or_else(|| model_pool.models.get(&(cell.tile, stage, 0)))
+                .or_else(|| model_pool.models.get(&(cell.tile, 0, 0)));
+
+            if let Some(scene_handle) = model {
+                commands.spawn((
+                    SceneRoot(scene_handle.clone()),
+                    Transform::from_xyz(world_x, base_y, world_z),
+                    BuildingMarker { col, row },
+                ));
                 continue;
             }
+        }
 
-            let (r, g, b) = cell.tile.color();
-            let building_h = height * 0.4;
-            let base_y = cell.terrain_height * HEIGHT_SCALE;
+        // Cube fallback: use pre-allocated shared handles
+        let mesh = cube_handles.meshes.get(&(cell.tile, stage))
+            .or_else(|| cube_handles.meshes.get(&(cell.tile, 0)));
+        let material = cube_handles.materials.get(&cell.tile);
 
+        if let (Some(mesh_handle), Some(mat_handle)) = (mesh, material) {
             commands.spawn((
-                Mesh3d(meshes.add(Cuboid::new(0.7, building_h, 0.7))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(r, g, b),
-                    perceptual_roughness: 0.6,
-                    ..default()
-                })),
-                Transform::from_xyz(
-                    col as f32 * TILE_SIZE + TILE_SIZE / 2.0,
-                    base_y + building_h / 2.0,
-                    row as f32 * TILE_SIZE + TILE_SIZE / 2.0,
-                ),
+                Mesh3d(mesh_handle.clone()),
+                MeshMaterial3d(mat_handle.clone()),
+                Transform::from_xyz(world_x, base_y + building_h / 2.0, world_z),
                 BuildingMarker { col, row },
             ));
         }
