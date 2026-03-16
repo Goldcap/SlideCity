@@ -52,7 +52,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "SlideCity".to_string(),
-                resolution: (1280.0, 720.0).into(),
+                resolution: (1920.0, 1080.0).into(),
                 ..default()
             }),
             ..default()
@@ -185,8 +185,15 @@ fn camera_controls(
     mut mouse_motion: EventReader<bevy::input::mouse::MouseMotion>,
     mut scroll: EventReader<bevy::input::mouse::MouseWheel>,
     mut query: Query<(&mut OrbitCamera, &mut Transform)>,
+    grid_res: Res<GameGrid>,
 ) {
     let (mut orbit, mut transform) = query.single_mut();
+
+    // Accumulate mouse motion for this frame
+    let mut delta = Vec2::ZERO;
+    for ev in mouse_motion.read() {
+        delta += ev.delta;
+    }
 
     // Q/E rotate
     let rotate_speed = 1.5 * time.delta_secs();
@@ -199,12 +206,16 @@ fn camera_controls(
 
     // Right-click drag to rotate
     if mouse_button.pressed(MouseButton::Right) {
-        for ev in mouse_motion.read() {
-            orbit.yaw += ev.delta.x * 0.005;
-            orbit.pitch = (orbit.pitch - ev.delta.y * 0.005).clamp(0.2, 1.4);
-        }
-    } else {
-        mouse_motion.clear();
+        orbit.yaw += delta.x * 0.005;
+        orbit.pitch = (orbit.pitch - delta.y * 0.005).clamp(0.2, 1.4);
+    }
+
+    // Middle-click drag to pan
+    if mouse_button.pressed(MouseButton::Middle) {
+        let forward = Vec3::new(-orbit.yaw.sin(), 0.0, -orbit.yaw.cos());
+        let right = Vec3::new(orbit.yaw.cos(), 0.0, -orbit.yaw.sin());
+        let sensitivity = orbit.distance * 0.003; // scale pan speed with zoom
+        orbit.target += right * (-delta.x * sensitivity) + forward * (delta.y * sensitivity);
     }
 
     // Scroll to zoom
@@ -229,8 +240,11 @@ fn camera_controls(
         orbit.target += right * pan_speed;
     }
 
-    // Speed control
-    // (handled in simulation_tick)
+    // Clamp camera target to grid bounds
+    let max_x = grid_res.grid.width as f32 * TILE_SIZE;
+    let max_z = grid_res.grid.height as f32 * TILE_SIZE;
+    orbit.target.x = orbit.target.x.clamp(0.0, max_x);
+    orbit.target.z = orbit.target.z.clamp(0.0, max_z);
 
     // Apply orbit transform
     let offset = Vec3::new(
