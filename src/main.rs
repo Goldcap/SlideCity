@@ -4,6 +4,8 @@ mod influence;
 mod mayor;
 mod sim;
 
+use std::path::Path;
+
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
 use bevy::render::render_asset::RenderAssetUsages;
@@ -40,10 +42,217 @@ struct GameState {
 #[derive(Resource)]
 struct TerrainMeshHandle(Handle<Mesh>);
 
+/// Whether the terrain texture atlas is loaded and active.
+#[derive(Resource)]
+struct TerrainAtlas {
+    loaded: bool,
+}
+
 // ===== CONSTANTS =====
 
 const TILE_SIZE: f32 = 1.0; // World units per grid cell
 const HEIGHT_SCALE: f32 = 3.0; // Terrain height exaggeration
+const ATLAS_TILE_UV: f32 = 1.0 / 16.0; // UV size of one tile (16x16 grid)
+
+// ===== ATLAS TILE MAPPING =====
+
+/// Returns the (col, row) position in the atlas for a terrain type (row 0).
+fn terrain_atlas_index(terrain: TerrainType) -> (u32, u32) {
+    let col = match terrain {
+        TerrainType::Grass => 0,
+        TerrainType::GrassFlower => 1,
+        TerrainType::Trees => 2,
+        TerrainType::TreesSparse => 3,
+        TerrainType::Sand => 4,
+        TerrainType::Dirt => 5,
+        TerrainType::Rock => 6,
+        TerrainType::Snow => 7,
+    };
+    (col, 0)
+}
+
+/// Returns the (col, row) position in the atlas for a zone tile type (row 5).
+fn zone_atlas_index(tile: TileType) -> Option<(u32, u32)> {
+    let col = match tile {
+        TileType::Residential => 0,
+        TileType::Commercial => 1,
+        TileType::Industrial => 2,
+        TileType::Park => 3,
+        TileType::PowerPlant => 4,
+        TileType::WaterTower => 5,
+        TileType::Monument => 6,
+        TileType::Road => 7,
+        _ => return None,
+    };
+    Some((col, 5))
+}
+
+/// Terrain type priority for transition tile selection (higher = wins).
+fn terrain_priority(t: TerrainType) -> u8 {
+    match t {
+        TerrainType::Grass => 0,
+        TerrainType::GrassFlower => 1,
+        TerrainType::TreesSparse => 2,
+        TerrainType::Trees => 3,
+        TerrainType::Dirt => 4,
+        TerrainType::Sand => 5,
+        TerrainType::Rock => 6,
+        TerrainType::Snow => 7,
+    }
+}
+
+/// Transition pair index in the atlas. Returns (pair_index, direction_offset).
+/// Transition tiles are laid out in rows 1-4, 4 tiles per pair (N/E/S/W).
+fn transition_pair_index(a: TerrainType, b: TerrainType) -> Option<usize> {
+    // Order: low-priority type is "base", high-priority is "overlay"
+    let (base, overlay) = if terrain_priority(a) < terrain_priority(b) {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    // Match against the known transition pairs (must match Python generator order)
+    let pairs: &[(TerrainType, TerrainType)] = &[
+        (TerrainType::Grass, TerrainType::Sand),
+        (TerrainType::Grass, TerrainType::Dirt),
+        (TerrainType::Grass, TerrainType::Rock),
+        (TerrainType::Sand, TerrainType::Dirt),
+        (TerrainType::Sand, TerrainType::Rock),
+        (TerrainType::Dirt, TerrainType::Rock),
+        (TerrainType::Rock, TerrainType::Snow),
+        (TerrainType::Snow, TerrainType::Grass),
+        (TerrainType::Grass, TerrainType::Trees),
+        (TerrainType::Trees, TerrainType::Dirt),
+        (TerrainType::Sand, TerrainType::Snow),
+        (TerrainType::Dirt, TerrainType::Snow),
+    ];
+    pairs.iter().position(|&(pa, pb)| {
+        (pa == base && pb == overlay) || (pb == base && pa == overlay)
+    })
+}
+
+/// Compute the atlas tile (col, row) for a cell, considering neighbors for transitions.
+#[allow(unused_assignments)]
+fn cell_atlas_tile(grid: &Grid, col: usize, row: usize) -> (u32, u32) {
+    let cell = grid.get(col, row);
+
+    // WaterBody cells don't use the atlas
+    if cell.tile == TileType::WaterBody {
+        return (0, 0); // Will be hidden by water plane anyway
+    }
+
+    // Developed cells use zone overlay tiles
+    if cell.tile != TileType::Empty {
+        if let Some(idx) = zone_atlas_index(cell.tile) {
+            return idx;
+        }
+        // Fallback for tiles without a zone atlas entry (PowerLine, WaterMain, Fire, Rubble)
+        return terrain_atlas_index(cell.terrain_type);
+    }
+
+    // Empty cells: check neighbors for transitions
+    let my_terrain = cell.terrain_type;
+    let my_priority = terrain_priority(my_terrain);
+
+    // Check cardinal neighbors for different terrain types
+    let mut highest_neighbor: Option<TerrainType> = None;
+    let mut highest_priority = my_priority;
+    let mut transition_edge: u8 = 0; // bitmask: N=8, E=4, S=2, W=1
+
+    // North
+    if row > 0 {
+        let n = grid.get(col, row - 1);
+        if n.tile == TileType::Empty && n.terrain_type != my_terrain {
+            let p = terrain_priority(n.terrain_type);
+            if p > highest_priority {
+                highest_priority = p;
+                highest_neighbor = Some(n.terrain_type);
+            }
+            transition_edge |= 8;
+        }
+    }
+    // East
+    if col + 1 < grid.width {
+        let n = grid.get(col + 1, row);
+        if n.tile == TileType::Empty && n.terrain_type != my_terrain {
+            let p = terrain_priority(n.terrain_type);
+            if p > highest_priority {
+                highest_priority = p;
+                highest_neighbor = Some(n.terrain_type);
+            }
+            transition_edge |= 4;
+        }
+    }
+    // South
+    if row + 1 < grid.height {
+        let n = grid.get(col, row + 1);
+        if n.tile == TileType::Empty && n.terrain_type != my_terrain {
+            let p = terrain_priority(n.terrain_type);
+            if p > highest_priority {
+                highest_priority = p;
+                highest_neighbor = Some(n.terrain_type);
+            }
+            transition_edge |= 2;
+        }
+    }
+    // West
+    if col > 0 {
+        let n = grid.get(col - 1, row);
+        if n.tile == TileType::Empty && n.terrain_type != my_terrain {
+            let p = terrain_priority(n.terrain_type);
+            if p > highest_priority {
+                highest_priority = p;
+                highest_neighbor = Some(n.terrain_type);
+            }
+            transition_edge |= 1;
+        }
+    }
+
+    // If no significant neighbor transition, use base tile
+    if highest_neighbor.is_none() || transition_edge == 0 {
+        return terrain_atlas_index(my_terrain);
+    }
+
+    let neighbor = highest_neighbor.unwrap();
+
+    // Find the transition pair in the atlas
+    if let Some(pair_idx) = transition_pair_index(my_terrain, neighbor) {
+        // Direction offset: N=0, E=1, S=2, W=3
+        // Pick the primary transition direction (first set bit)
+        let dir_offset = if transition_edge & 8 != 0 {
+            0 // North
+        } else if transition_edge & 4 != 0 {
+            1 // East
+        } else if transition_edge & 2 != 0 {
+            2 // South
+        } else {
+            3 // West
+        };
+
+        // Transition tiles start at row 1, 4 tiles per pair
+        let flat_idx = pair_idx * 4 + dir_offset;
+        let atlas_col = (flat_idx % 16) as u32;
+        let atlas_row = 1 + (flat_idx / 16) as u32;
+        return (atlas_col, atlas_row);
+    }
+
+    // No matching transition pair in atlas — use base tile
+    terrain_atlas_index(my_terrain)
+}
+
+/// Convert an atlas tile (col, row) to UV coordinates for a cell's 4 vertices.
+/// Returns [TL, TR, BL, BR] UV pairs.
+fn atlas_uvs(atlas_col: u32, atlas_row: u32) -> [[f32; 2]; 4] {
+    let u_min = atlas_col as f32 * ATLAS_TILE_UV;
+    let v_min = atlas_row as f32 * ATLAS_TILE_UV;
+    let u_max = u_min + ATLAS_TILE_UV;
+    let v_max = v_min + ATLAS_TILE_UV;
+    [
+        [u_min, v_min], // TL
+        [u_max, v_min], // TR
+        [u_min, v_max], // BL
+        [u_max, v_max], // BR
+    ]
+}
 
 // ===== MAIN =====
 
@@ -71,6 +280,7 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
@@ -82,19 +292,44 @@ fn setup(
     let mayor = Mayor::new(0);
     let funds = config.starting_funds;
 
-    // Generate terrain mesh
-    let terrain_mesh = build_terrain_mesh(&grid);
+    // Check for terrain atlas texture
+    let atlas_path = "textures/terrain_atlas.png";
+    let atlas_exists = Path::new("assets").join(atlas_path).exists();
+    let use_atlas = atlas_exists;
+
+    if atlas_exists {
+        info!("Terrain atlas found — using textured terrain");
+    } else {
+        info!("No terrain atlas at assets/{} — using vertex color fallback", atlas_path);
+    }
+
+    // Generate terrain mesh (with UVs if atlas exists)
+    let terrain_mesh = build_terrain_mesh(&grid, use_atlas);
     let mesh_handle = meshes.add(terrain_mesh);
 
-    // Terrain entity
-    commands.spawn((
-        Mesh3d(mesh_handle.clone()),
-        MeshMaterial3d(materials.add(StandardMaterial {
+    // Terrain material: textured if atlas available, vertex-colored otherwise
+    let terrain_material = if use_atlas {
+        let texture_handle: Handle<Image> = asset_server.load(atlas_path);
+        materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            base_color_texture: Some(texture_handle),
+            perceptual_roughness: 0.9,
+            metallic: 0.0,
+            ..default()
+        })
+    } else {
+        materials.add(StandardMaterial {
             base_color: Color::WHITE,
             perceptual_roughness: 0.9,
             metallic: 0.0,
             ..default()
-        })),
+        })
+    };
+
+    // Terrain entity
+    commands.spawn((
+        Mesh3d(mesh_handle.clone()),
+        MeshMaterial3d(terrain_material),
         Transform::default(),
     ));
 
@@ -166,6 +401,7 @@ fn setup(
         speed_levels: [1.0, 2.0, 4.0, 8.0],
     });
     commands.insert_resource(TerrainMeshHandle(mesh_handle));
+    commands.insert_resource(TerrainAtlas { loaded: use_atlas });
 }
 
 // ===== ORBIT CAMERA =====
@@ -258,26 +494,21 @@ fn camera_controls(
 
 // ===== TERRAIN MESH =====
 
-fn build_terrain_mesh(grid: &Grid) -> Mesh {
+fn build_terrain_mesh(grid: &Grid, use_atlas: bool) -> Mesh {
     let w = grid.width;
     let h = grid.height;
-    // Each cell gets its own 4 vertices (no sharing) for crisp per-cell colors
+    // Each cell gets its own 4 vertices (no sharing) for crisp per-cell colors/UVs
     let num_cells = w * h;
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(num_cells * 4);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(num_cells * 4);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(num_cells * 4);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(num_cells * 4);
     let mut indices: Vec<u32> = Vec::with_capacity(num_cells * 6);
 
     for row in 0..h {
         for col in 0..w {
             let cell = grid.get(col, row);
             let base_idx = (row * w + col) as u32 * 4;
-
-            let cell_h = if cell.tile == TileType::WaterBody {
-                0.0
-            } else {
-                cell.terrain_height * HEIGHT_SCALE
-            };
 
             // Sample neighbor heights for corners (average with adjacent cells)
             let h_tl = corner_height(grid, col, row, HEIGHT_SCALE);
@@ -305,9 +536,22 @@ fn build_terrain_mesh(grid: &Grid) -> Mesh {
             normals.push(n);
             normals.push(n);
 
-            // Same color for all 4 vertices = crisp per-cell coloring
-            let (r, g, b) = terrain_color(cell);
-            let color = [r, g, b, 1.0];
+            // UV coordinates: map to atlas tile based on terrain/tile type
+            let (atlas_col, atlas_row) = cell_atlas_tile(grid, col, row);
+            let cell_uvs = atlas_uvs(atlas_col, atlas_row);
+            uvs.push(cell_uvs[0]);
+            uvs.push(cell_uvs[1]);
+            uvs.push(cell_uvs[2]);
+            uvs.push(cell_uvs[3]);
+
+            // Vertex color: white when atlas is active (texture provides color),
+            // terrain color when no atlas (fallback)
+            let color = if use_atlas {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                let (r, g, b) = terrain_color(cell);
+                [r, g, b, 1.0]
+            };
             colors.push(color);
             colors.push(color);
             colors.push(color);
@@ -328,6 +572,7 @@ fn build_terrain_mesh(grid: &Grid) -> Mesh {
         .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
         .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
         .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
         .with_inserted_indices(Indices::U32(indices))
 }
 
@@ -423,6 +668,7 @@ fn simulation_tick(
 fn update_terrain_mesh(
     grid_res: Res<GameGrid>,
     terrain_handle: Res<TerrainMeshHandle>,
+    atlas: Res<TerrainAtlas>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     if !grid_res.is_changed() {
@@ -433,14 +679,31 @@ fn update_terrain_mesh(
         let grid = &grid_res.grid;
         let w = grid.width;
         let h = grid.height;
-        // 4 vertices per cell, same color for all 4
-        let mut colors: Vec<[f32; 4]> = Vec::with_capacity(w * h * 4);
+        let num_verts = w * h * 4;
+        let use_atlas = atlas.loaded;
+
+        let mut colors: Vec<[f32; 4]> = Vec::with_capacity(num_verts);
+        let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(num_verts);
 
         for row in 0..h {
             for col in 0..w {
                 let cell = grid.get(col, row);
-                let (r, g, b) = terrain_color(cell);
-                let color = [r, g, b, 1.0];
+
+                // UV coordinates
+                let (atlas_col, atlas_row) = cell_atlas_tile(grid, col, row);
+                let cell_uvs = atlas_uvs(atlas_col, atlas_row);
+                uvs.push(cell_uvs[0]);
+                uvs.push(cell_uvs[1]);
+                uvs.push(cell_uvs[2]);
+                uvs.push(cell_uvs[3]);
+
+                // Vertex color
+                let color = if use_atlas {
+                    [1.0, 1.0, 1.0, 1.0]
+                } else {
+                    let (r, g, b) = terrain_color(cell);
+                    [r, g, b, 1.0]
+                };
                 colors.push(color);
                 colors.push(color);
                 colors.push(color);
@@ -449,6 +712,7 @@ fn update_terrain_mesh(
         }
 
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     }
 }
 

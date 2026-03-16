@@ -201,11 +201,11 @@ uvs: [[u_min, v_min], [u_max, v_min], [u_min, v_max], [u_max, v_max]]
 **New files:** `assets/textures/terrain_atlas.png` (downloaded), `scripts/build_atlas.py` (committed)
 
 **Success criteria:**
-- [ ] Terrain renders with textures when atlas exists in `assets/textures/`
-- [ ] Terrain falls back to vertex colors when atlas is missing
-- [ ] Transition tiles appear at terrain type boundaries
-- [ ] 3+ type corners resolve cleanly via priority system
-- [ ] Zone placement updates terrain UVs correctly
+- [x] Terrain renders with textures when atlas exists in `assets/textures/`
+- [x] Terrain falls back to vertex colors when atlas is missing
+- [x] Transition tiles appear at terrain type boundaries
+- [x] 3+ type corners resolve cleanly via priority system
+- [x] Zone placement updates terrain UVs correctly
 - [ ] No visible seams between tiles (seamless atlas tiles)
 - [ ] Performance: terrain mesh rebuild < 5ms on 128x128 grid
 
@@ -509,8 +509,8 @@ assets/textures/terrain_atlas.png
 - [x] **P1:** Window opens at 1920x1080
 - [x] **P1:** Middle-click drag pans camera, works alongside WASD/right-drag/scroll
 - [x] **P1:** Camera target clamped to grid bounds
-- [ ] **P2:** Terrain renders with texture atlas when available, vertex colors as fallback
-- [ ] **P2:** Terrain transition tiles at type boundaries
+- [x] **P2:** Terrain renders with texture atlas when available, vertex colors as fallback
+- [x] **P2:** Terrain transition tiles at type boundaries
 - [ ] **P3:** GLTF building models per type/stage/variant, cube fallback
 - [ ] **P3:** Incremental building updates (no full despawn/respawn)
 - [ ] **P4:** GLTF trees on forest cells with LOD
