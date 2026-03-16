@@ -1,7 +1,7 @@
 ---
 title: "feat: SC4-Level Visual Upgrade"
 type: feat
-status: active
+status: completed
 date: 2026-03-16
 origin: docs/brainstorms/2026-03-16-sc4-visual-upgrade-brainstorm.md
 ---
