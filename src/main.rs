@@ -95,6 +95,14 @@ struct BuildingModelPool {
     has_models: bool,
 }
 
+/// Road network mesh entity + reusable buffers.
+#[allow(dead_code)]
+#[derive(Resource)]
+struct RoadMeshRes {
+    handle: Handle<Mesh>,
+    entity: Entity,
+}
+
 /// Pre-loaded tree mesh+material handles for instanced rendering.
 /// Uses flat Mesh3d entities (NOT SceneRoot) for guaranteed GPU instancing.
 #[derive(Resource)]
@@ -354,6 +362,7 @@ fn main() {
             update_terrain_mesh.in_set(GameSet::Render),
             update_buildings.in_set(GameSet::Render),
             spawn_trees.in_set(GameSet::Render),
+            update_road_mesh.in_set(GameSet::Render),
             tree_lod_update,
         ))
         .run();
@@ -576,6 +585,28 @@ fn setup(
     info!("Created {} procedural tree variants", tree_variants.len());
     commands.insert_resource(TreeMeshPool { variants: tree_variants });
     commands.insert_resource(TreeLodTimer(Timer::from_seconds(0.5, TimerMode::Repeating)));
+
+    // Road network mesh (starts empty, rebuilt when roads are placed)
+    let road_mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new())
+        .with_inserted_indices(Indices::U32(Vec::new()));
+    let road_mesh_handle = meshes.add(road_mesh);
+    let road_entity = commands.spawn((
+        Mesh3d(road_mesh_handle.clone()),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.3, 0.3, 0.3),
+            perceptual_roughness: 0.95,
+            metallic: 0.0,
+            ..default()
+        })),
+        Transform::default(),
+    )).id();
+    commands.insert_resource(RoadMeshRes {
+        handle: road_mesh_handle,
+        entity: road_entity,
+    });
 }
 
 // ===== ORBIT CAMERA =====
@@ -1207,6 +1238,223 @@ fn tree_lod_update(
             *visibility = Visibility::Hidden;
         } else {
             *visibility = Visibility::Inherited;
+        }
+    }
+}
+
+// ===== ROAD NETWORK MESH =====
+
+/// Compute a 4-bit bitmask for a road cell based on cardinal road neighbors.
+/// N=8, E=4, S=2, W=1
+fn road_neighbor_mask(grid: &Grid, col: usize, row: usize) -> u8 {
+    let mut mask = 0u8;
+    if row > 0 && grid.get(col, row - 1).tile == TileType::Road {
+        mask |= 8; // North
+    }
+    if col + 1 < grid.width && grid.get(col + 1, row).tile == TileType::Road {
+        mask |= 4; // East
+    }
+    if row + 1 < grid.height && grid.get(col, row + 1).tile == TileType::Road {
+        mask |= 2; // South
+    }
+    if col > 0 && grid.get(col - 1, row).tile == TileType::Road {
+        mask |= 1; // West
+    }
+    mask
+}
+
+/// Road surface width relative to TILE_SIZE (narrower than full cell).
+const ROAD_WIDTH: f32 = 0.7;
+const ROAD_HALF: f32 = ROAD_WIDTH / 2.0;
+const ROAD_Y_OFFSET: f32 = 0.05; // Above terrain to avoid z-fighting
+
+/// Generate road mesh geometry for a single cell based on its neighbor mask.
+/// Appends vertices and indices to the provided buffers.
+#[allow(clippy::too_many_arguments)]
+fn emit_road_cell(
+    grid: &Grid,
+    col: usize,
+    row: usize,
+    mask: u8,
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    colors: &mut Vec<[f32; 4]>,
+    indices: &mut Vec<u32>,
+) {
+    let cx = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+    let cz = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+    let cell = grid.get(col, row);
+    let y = cell.terrain_height * HEIGHT_SCALE + ROAD_Y_OFFSET;
+
+    let up = [0.0f32, 1.0, 0.0];
+
+    // Road colors: center is darker asphalt, edges slightly lighter
+    let road_color = [0.28, 0.28, 0.30, 1.0];
+    let marking_color = [0.75, 0.72, 0.55, 1.0]; // Yellow center line
+
+    // Always emit a center square (the intersection/base of the road)
+    let base_idx = positions.len() as u32;
+    positions.push([cx - ROAD_HALF, y, cz - ROAD_HALF]);
+    positions.push([cx + ROAD_HALF, y, cz - ROAD_HALF]);
+    positions.push([cx - ROAD_HALF, y, cz + ROAD_HALF]);
+    positions.push([cx + ROAD_HALF, y, cz + ROAD_HALF]);
+    for _ in 0..4 { normals.push(up); colors.push(road_color); }
+    indices.extend_from_slice(&[base_idx, base_idx+2, base_idx+1, base_idx+1, base_idx+2, base_idx+3]);
+
+    // Extend road arms to cell edges based on neighbor mask
+    // North arm (towards -Z)
+    if mask & 8 != 0 {
+        let idx = positions.len() as u32;
+        let z_edge = row as f32 * TILE_SIZE;
+        positions.push([cx - ROAD_HALF, y, z_edge]);
+        positions.push([cx + ROAD_HALF, y, z_edge]);
+        positions.push([cx - ROAD_HALF, y, cz - ROAD_HALF]);
+        positions.push([cx + ROAD_HALF, y, cz - ROAD_HALF]);
+        for _ in 0..4 { normals.push(up); colors.push(road_color); }
+        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+
+        // Center line marking
+        emit_center_line(positions, normals, colors, indices,
+            cx, y + 0.001, z_edge, cz - ROAD_HALF, true, marking_color);
+    }
+
+    // East arm (towards +X)
+    if mask & 4 != 0 {
+        let idx = positions.len() as u32;
+        let x_edge = (col + 1) as f32 * TILE_SIZE;
+        positions.push([cx + ROAD_HALF, y, cz - ROAD_HALF]);
+        positions.push([x_edge, y, cz - ROAD_HALF]);
+        positions.push([cx + ROAD_HALF, y, cz + ROAD_HALF]);
+        positions.push([x_edge, y, cz + ROAD_HALF]);
+        for _ in 0..4 { normals.push(up); colors.push(road_color); }
+        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+
+        emit_center_line(positions, normals, colors, indices,
+            cx + ROAD_HALF, y + 0.001, cz, cz, false, marking_color);
+    }
+
+    // South arm (towards +Z)
+    if mask & 2 != 0 {
+        let idx = positions.len() as u32;
+        let z_edge = (row + 1) as f32 * TILE_SIZE;
+        positions.push([cx - ROAD_HALF, y, cz + ROAD_HALF]);
+        positions.push([cx + ROAD_HALF, y, cz + ROAD_HALF]);
+        positions.push([cx - ROAD_HALF, y, z_edge]);
+        positions.push([cx + ROAD_HALF, y, z_edge]);
+        for _ in 0..4 { normals.push(up); colors.push(road_color); }
+        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+
+        emit_center_line(positions, normals, colors, indices,
+            cx, y + 0.001, cz + ROAD_HALF, z_edge, true, marking_color);
+    }
+
+    // West arm (towards -X)
+    if mask & 1 != 0 {
+        let idx = positions.len() as u32;
+        let x_edge = col as f32 * TILE_SIZE;
+        positions.push([x_edge, y, cz - ROAD_HALF]);
+        positions.push([cx - ROAD_HALF, y, cz - ROAD_HALF]);
+        positions.push([x_edge, y, cz + ROAD_HALF]);
+        positions.push([cx - ROAD_HALF, y, cz + ROAD_HALF]);
+        for _ in 0..4 { normals.push(up); colors.push(road_color); }
+        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+
+        emit_center_line(positions, normals, colors, indices,
+            x_edge, y + 0.001, cz, cz, false, marking_color);
+    }
+}
+
+/// Emit a thin center line marking quad.
+#[allow(clippy::too_many_arguments)]
+fn emit_center_line(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    colors: &mut Vec<[f32; 4]>,
+    indices: &mut Vec<u32>,
+    x: f32, y: f32, z_start: f32, z_end: f32,
+    vertical: bool,  // true = N/S (along Z), false = E/W (along X)
+    color: [f32; 4],
+) {
+    let idx = positions.len() as u32;
+    let up = [0.0f32, 1.0, 0.0];
+    let line_width = 0.03;
+
+    if vertical {
+        positions.push([x - line_width, y, z_start]);
+        positions.push([x + line_width, y, z_start]);
+        positions.push([x - line_width, y, z_end]);
+        positions.push([x + line_width, y, z_end]);
+    } else {
+        // Horizontal: x varies, z is center
+        let cx = x;
+        let x_end = cx + ROAD_HALF;
+        positions.push([cx, y, z_start - line_width]);
+        positions.push([x_end, y, z_start - line_width]);
+        positions.push([cx, y, z_start + line_width]);
+        positions.push([x_end, y, z_start + line_width]);
+    }
+    for _ in 0..4 { normals.push(up); colors.push(color); }
+    indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+}
+
+/// Full rebuild of the road network mesh from grid state.
+fn build_road_mesh(grid: &Grid) -> Mesh {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut colors: Vec<[f32; 4]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for row in 0..grid.height {
+        for col in 0..grid.width {
+            if grid.get(col, row).tile != TileType::Road {
+                continue;
+            }
+            let mask = road_neighbor_mask(grid, col, row);
+            emit_road_cell(grid, col, row, mask, &mut positions, &mut normals, &mut colors, &mut indices);
+        }
+    }
+
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
+        .with_inserted_indices(Indices::U32(indices))
+}
+
+/// Update the road mesh when road cells change.
+fn update_road_mesh(
+    grid_res: Res<GameGrid>,
+    prev_state: Res<PreviousCellState>,
+    road_res: Res<RoadMeshRes>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    // Only rebuild if any dirty cell involves a road
+    if prev_state.dirty.is_empty() {
+        return;
+    }
+
+    let grid = &grid_res.grid;
+
+    // Conservative: rebuild road mesh on any dirty cell change.
+    // Road neighbors affect adjacent cells' mesh pieces, so any tile change
+    // near a road could affect the road mesh.
+
+    // Full rebuild of road mesh
+    let new_mesh = build_road_mesh(grid);
+
+    if let Some(mesh) = meshes.get_mut(&road_res.handle) {
+        // Copy attributes from new mesh
+        if let Some(pos) = new_mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone());
+        }
+        if let Some(norm) = new_mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, norm.clone());
+        }
+        if let Some(col) = new_mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
+            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col.clone());
+        }
+        if let Some(idx) = new_mesh.indices() {
+            mesh.insert_indices(idx.clone());
         }
     }
 }

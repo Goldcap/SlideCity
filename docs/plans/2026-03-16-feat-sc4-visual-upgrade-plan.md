@@ -438,13 +438,13 @@ struct RoadMesh {
 **Files changed:** `src/road_mesh.rs` (new), `src/bitmask_config.rs` (shared with terrain transitions), `src/main.rs` (setup)
 
 **Success criteria:**
-- [ ] All 16 road configurations render correctly
-- [ ] Road mesh rebuilds incrementally when roads are placed/removed
-- [ ] Roads sit slightly above terrain (no z-fighting)
-- [ ] Road texture applied when available, dark gray fallback otherwise
-- [ ] T-junctions, 4-way intersections, and curves look correct
+- [x] All 16 road configurations render correctly
+- [x] Road mesh rebuilds incrementally when roads are placed/removed
+- [x] Roads sit slightly above terrain (no z-fighting)
+- [x] Road texture applied when available, dark gray fallback otherwise
+- [x] T-junctions, 4-way intersections, and curves look correct
 - [ ] Performance: road mesh rebuild < 3ms for ~2,000 road cells
-- [ ] Dead-ends and isolated roads have visual caps
+- [x] Dead-ends and isolated roads have visual caps
 
 ---
 
@@ -514,8 +514,8 @@ assets/textures/terrain_atlas.png
 - [x] **P3:** GLTF building models per type/stage/variant, cube fallback
 - [x] **P3:** Incremental building updates (no full despawn/respawn)
 - [x] **P4:** GLTF trees on forest cells with LOD
-- [ ] **P5:** Full road network mesh with all 16 configurations
-- [ ] **P5:** Road texture when available, gray fallback
+- [x] **P5:** Full road network mesh with all 16 configurations
+- [x] **P5:** Road texture when available, gray fallback
 
 ### Non-Functional Requirements
 
