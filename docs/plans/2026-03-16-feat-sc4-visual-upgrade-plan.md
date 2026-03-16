@@ -366,13 +366,13 @@ LOD switching is a simple component write (`Mesh3d` handle swap), not a scene hi
 **Files changed:** `src/tree_system.rs` (new), `src/main.rs` (setup)
 
 **Success criteria:**
-- [ ] Trees spawn on Trees/TreesSparse terrain cells
-- [ ] Multiple trees per cell with randomized positions
-- [ ] LOD switches at distance thresholds
-- [ ] Trees hidden beyond 150 units from camera
-- [ ] Bevy auto-instances identical tree meshes (verify with diagnostics)
+- [x] Trees spawn on Trees/TreesSparse terrain cells
+- [x] Multiple trees per cell with randomized positions
+- [x] LOD switches at distance thresholds
+- [x] Trees hidden beyond 150 units from camera
+- [x] Bevy auto-instances identical tree meshes (verify with diagnostics)
 - [ ] Performance: < 1ms per frame for tree LOD updates
-- [ ] Trees despawn when terrain type changes (zone placement on forest)
+- [x] Trees despawn when terrain type changes (zone placement on forest)
 
 ---
 
@@ -513,7 +513,7 @@ assets/textures/terrain_atlas.png
 - [x] **P2:** Terrain transition tiles at type boundaries
 - [x] **P3:** GLTF building models per type/stage/variant, cube fallback
 - [x] **P3:** Incremental building updates (no full despawn/respawn)
-- [ ] **P4:** GLTF trees on forest cells with LOD
+- [x] **P4:** GLTF trees on forest cells with LOD
 - [ ] **P5:** Full road network mesh with all 16 configurations
 - [ ] **P5:** Road texture when available, gray fallback
 

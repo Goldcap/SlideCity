@@ -95,6 +95,24 @@ struct BuildingModelPool {
     has_models: bool,
 }
 
+/// Pre-loaded tree mesh+material handles for instanced rendering.
+/// Uses flat Mesh3d entities (NOT SceneRoot) for guaranteed GPU instancing.
+#[derive(Resource)]
+struct TreeMeshPool {
+    /// (mesh, material) per variant — all trees of same variant share handles
+    variants: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+}
+
+#[derive(Component)]
+struct TreeMarker {
+    col: usize,
+    row: usize,
+}
+
+/// Timer for LOD updates (not every frame).
+#[derive(Resource)]
+struct TreeLodTimer(Timer);
+
 // ===== SYSTEM SETS =====
 
 /// Execution order for game systems to prevent one-frame-lag visual artifacts.
@@ -335,6 +353,8 @@ fn main() {
             compute_dirty_cells.in_set(GameSet::DirtyCompute),
             update_terrain_mesh.in_set(GameSet::Render),
             update_buildings.in_set(GameSet::Render),
+            spawn_trees.in_set(GameSet::Render),
+            tree_lod_update,
         ))
         .run();
 }
@@ -550,6 +570,12 @@ fn setup(
         loaded: false,
         has_models,
     });
+
+    // Create procedural tree variants for instanced rendering
+    let tree_variants = create_tree_variants(&mut meshes, &mut materials);
+    info!("Created {} procedural tree variants", tree_variants.len());
+    commands.insert_resource(TreeMeshPool { variants: tree_variants });
+    commands.insert_resource(TreeLodTimer(Timer::from_seconds(0.5, TimerMode::Repeating)));
 }
 
 // ===== ORBIT CAMERA =====
@@ -968,6 +994,219 @@ fn update_buildings(
                 Transform::from_xyz(world_x, base_y + building_h / 2.0, world_z),
                 BuildingMarker { col, row },
             ));
+        }
+    }
+}
+
+// ===== TREES =====
+
+/// Generate a simple cone mesh for tree foliage (procedural placeholder).
+fn make_cone_mesh(radius: f32, height: f32, segments: u32) -> Mesh {
+    let mut positions = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+
+    // Tip vertex
+    positions.push([0.0, height, 0.0]);
+    normals.push([0.0, 1.0, 0.0]);
+
+    // Base ring
+    for i in 0..segments {
+        let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+        let x = angle.cos() * radius;
+        let z = angle.sin() * radius;
+        positions.push([x, 0.0, z]);
+        // Approximate outward normal
+        let ny = radius / height;
+        let n = Vec3::new(angle.cos(), ny, angle.sin()).normalize();
+        normals.push([n.x, n.y, n.z]);
+    }
+
+    // Side triangles (tip to base ring)
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        indices.push(0); // tip
+        indices.push(1 + i);
+        indices.push(1 + next);
+    }
+
+    // Base center
+    let base_center = positions.len() as u32;
+    positions.push([0.0, 0.0, 0.0]);
+    normals.push([0.0, -1.0, 0.0]);
+
+    // Base triangles
+    for i in 0..segments {
+        let next = (i + 1) % segments;
+        indices.push(base_center);
+        indices.push(1 + next);
+        indices.push(1 + i);
+    }
+
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_indices(Indices::U32(indices))
+}
+
+/// Create procedural tree variants (different sizes/colors) as shared mesh handles.
+fn create_tree_variants(
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Vec<(Handle<Mesh>, Handle<StandardMaterial>)> {
+    let variants = [
+        // (foliage_radius, foliage_height, trunk_height, color)
+        (0.25, 0.5, 0.15, Color::srgb(0.12, 0.40, 0.10)),  // small dark green
+        (0.30, 0.6, 0.20, Color::srgb(0.18, 0.45, 0.12)),  // medium green
+        (0.22, 0.55, 0.18, Color::srgb(0.15, 0.38, 0.08)),  // slim dark
+        (0.35, 0.7, 0.15, Color::srgb(0.20, 0.50, 0.15)),  // large bright
+    ];
+
+    variants.iter().map(|&(radius, height, trunk_h, color)| {
+        // Combine trunk cylinder + foliage cone into a single mesh
+        // For simplicity, just use the cone (trunk is tiny at this scale)
+        let mut cone = make_cone_mesh(radius, height, 8);
+
+        // Offset cone up by trunk height
+        if let Some(bevy::render::mesh::VertexAttributeValues::Float32x3(ref mut pos)) =
+            cone.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        {
+            for p in pos.iter_mut() {
+                p[1] += trunk_h;
+            }
+        }
+
+        let mesh_handle = meshes.add(cone);
+        let mat_handle = materials.add(StandardMaterial {
+            base_color: color,
+            perceptual_roughness: 0.8,
+            ..default()
+        });
+
+        (mesh_handle, mat_handle)
+    }).collect()
+}
+
+/// Spawn trees on forest terrain cells. Only runs when terrain types change.
+fn spawn_trees(
+    mut commands: Commands,
+    grid_res: Res<GameGrid>,
+    prev_state: Res<PreviousCellState>,
+    tree_pool: Res<TreeMeshPool>,
+    existing: Query<(Entity, &TreeMarker)>,
+    mut initial_spawn_done: Local<bool>,
+) {
+    // On first frame, spawn all trees. After that, only update dirty cells.
+    let full_spawn = !*initial_spawn_done;
+    if !full_spawn && prev_state.dirty.is_empty() {
+        return;
+    }
+
+    let grid = &grid_res.grid;
+    let num_variants = tree_pool.variants.len();
+    if num_variants == 0 {
+        return;
+    }
+
+    if full_spawn {
+        *initial_spawn_done = true;
+        // Spawn trees for all forest cells
+        for row in 0..grid.height {
+            for col in 0..grid.width {
+                spawn_trees_for_cell(&mut commands, grid, col, row, &tree_pool, num_variants);
+            }
+        }
+    } else {
+        // Only handle dirty cells
+        // Despawn trees on dirty cells that are no longer forest
+        for (entity, marker) in &existing {
+            if prev_state.dirty.contains(&(marker.col, marker.row)) {
+                commands.entity(entity).despawn();
+            }
+        }
+        // Respawn trees on dirty cells that are now forest
+        for &(col, row) in &prev_state.dirty {
+            spawn_trees_for_cell(&mut commands, grid, col, row, &tree_pool, num_variants);
+        }
+    }
+}
+
+fn spawn_trees_for_cell(
+    commands: &mut Commands,
+    grid: &Grid,
+    col: usize,
+    row: usize,
+    tree_pool: &TreeMeshPool,
+    num_variants: usize,
+) {
+    let cell = grid.get(col, row);
+
+    // Only empty cells with forest terrain get trees
+    if cell.tile != TileType::Empty {
+        return;
+    }
+
+    let tree_count = match cell.terrain_type {
+        TerrainType::Trees => 3,
+        TerrainType::TreesSparse => 1,
+        _ => return,
+    };
+
+    let base_y = cell.terrain_height * HEIGHT_SCALE;
+
+    // Deterministic pseudo-random placement seeded by cell position
+    for i in 0..tree_count {
+        // Simple hash for position within cell
+        let seed = (col * 7919 + row * 6271 + i * 3571) as u32;
+        let fx = ((seed * 2654435761) & 0xFFFF) as f32 / 65535.0; // 0..1
+        let fz = ((seed * 2246822519) & 0xFFFF) as f32 / 65535.0; // 0..1
+
+        // Position within cell (with margin to avoid edges)
+        let margin = 0.15;
+        let x = col as f32 * TILE_SIZE + margin + fx * (TILE_SIZE - 2.0 * margin);
+        let z = row as f32 * TILE_SIZE + margin + fz * (TILE_SIZE - 2.0 * margin);
+
+        // Variant selection
+        let variant_idx = (col * 7 + row * 13 + i) % num_variants;
+        let (ref mesh, ref mat) = tree_pool.variants[variant_idx];
+
+        // Small random scale variation
+        let scale_seed = ((seed * 1103515245 + 12345) & 0xFFFF) as f32 / 65535.0;
+        let scale = 0.7 + scale_seed * 0.6; // 0.7 to 1.3
+
+        commands.spawn((
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_xyz(x, base_y, z)
+                .with_scale(Vec3::splat(scale)),
+            TreeMarker { col, row },
+        ));
+    }
+}
+
+/// LOD system: hide trees beyond a distance threshold.
+#[allow(clippy::type_complexity)]
+fn tree_lod_update(
+    time: Res<Time>,
+    mut lod_timer: ResMut<TreeLodTimer>,
+    camera_query: Query<&Transform, With<OrbitCamera>>,
+    mut tree_query: Query<(&Transform, &mut Visibility), (With<TreeMarker>, Without<OrbitCamera>)>,
+) {
+    lod_timer.0.tick(time.delta());
+    if !lod_timer.0.just_finished() {
+        return;
+    }
+
+    let camera_transform = camera_query.single();
+    let cam_pos = camera_transform.translation;
+
+    for (tree_transform, mut visibility) in &mut tree_query {
+        let dist_sq = cam_pos.distance_squared(tree_transform.translation);
+        // Hide trees beyond 150 units (150^2 = 22500)
+        if dist_sq > 22500.0 {
+            *visibility = Visibility::Hidden;
+        } else {
+            *visibility = Visibility::Inherited;
         }
     }
 }
