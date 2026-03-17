@@ -7,6 +7,9 @@ target/
 *.pdb
 **/mutants.out*/
 
+# Downloaded model assets (use scripts/download_building_models.sh)
+assets/models/
+
 # Environment
 .env
 

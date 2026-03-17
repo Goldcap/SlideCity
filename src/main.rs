@@ -84,13 +84,14 @@ struct CubeFallbackHandles {
 }
 
 /// Pre-loaded GLTF scene handles for building models.
+/// Models are organized by zone type, with indices picked by cell style/stage.
 #[derive(Resource)]
-#[allow(dead_code)]
 struct BuildingModelPool {
-    /// (tile_type, stage, variant) -> scene handle
-    models: HashMap<(TileType, u8, u8), Handle<Scene>>,
-    /// True once all handles are confirmed loaded (future: async loading check)
-    loaded: bool,
+    /// Zone type -> list of scene handles (small buildings first, large last)
+    residential: Vec<Handle<Scene>>,
+    commercial: Vec<Handle<Scene>>,
+    commercial_large: Vec<Handle<Scene>>, // skyscrapers for stage 2
+    industrial: Vec<Handle<Scene>>,
     /// True if any model files were found at startup
     has_models: bool,
 }
@@ -509,48 +510,46 @@ fn setup(
         }
     }
 
-    // Check for GLTF building models
-    let models_dir = Path::new("assets/models/buildings");
-    let has_models = models_dir.exists();
-    let mut model_pool = HashMap::new();
-
-    if has_models {
-        info!("Building models directory found — loading GLTFs");
-        let zone_dirs = [
-            ("residential", TileType::Residential),
-            ("commercial", TileType::Commercial),
-            ("industrial", TileType::Industrial),
-        ];
-        for (dir_name, tile_type) in &zone_dirs {
-            for stage in 1u8..=3 {
-                for variant in 1u8..=6 {
-                    let path = format!("models/buildings/{}/s{}_v{}.glb", dir_name, stage, variant);
-                    if Path::new("assets").join(&path).exists() {
-                        // Use #Scene0 label to load the first scene from the GLB
-                        let scene_path = format!("{}#Scene0", path);
-                        let handle: Handle<Scene> = asset_server.load(&scene_path);
-                        model_pool.insert((*tile_type, stage - 1, variant - 1), handle);
-                        info!("  Loaded {}", path);
-                    }
-                }
-            }
-        }
-        // Infrastructure models
-        let infra = [
-            ("models/buildings/infrastructure/power_plant.glb", TileType::PowerPlant),
-            ("models/buildings/infrastructure/water_tower.glb", TileType::WaterTower),
-            ("models/buildings/infrastructure/monument.glb", TileType::Monument),
-        ];
-        for (path, tile_type) in &infra {
-            if Path::new("assets").join(path).exists() {
-                let scene_path = format!("{}#Scene0", path);
+    // Load GLTF building models by scanning directories for GLB files
+    let load_glbs = |dir: &str, filter: &str, asset_server: &AssetServer| -> Vec<Handle<Scene>> {
+        let dir_path = Path::new("assets/models/buildings").join(dir);
+        let mut handles = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&dir_path) {
+            let mut files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.ends_with(".glb")
+                        && name.contains(filter)
+                        && !name.starts_with("detail-")
+                        && !name.starts_with("road-")
+                        && !name.starts_with("floor-")
+                })
+                .collect();
+            files.sort_by_key(|e| e.file_name());
+            for entry in &files {
+                let rel_path = format!("models/buildings/{}/{}", dir, entry.file_name().to_string_lossy());
+                let scene_path = format!("{}#Scene0", rel_path);
                 let handle: Handle<Scene> = asset_server.load(&scene_path);
-                model_pool.insert((*tile_type, 0, 0), handle);
-                info!("  Loaded {}", path);
+                info!("  Loaded {}", rel_path);
+                handles.push(handle);
             }
         }
+        handles
+    };
+
+    let residential = load_glbs("residential", "building", &asset_server);
+    let commercial = load_glbs("commercial", "building-", &asset_server);
+    // Separate skyscrapers for high-density commercial
+    let commercial_large = load_glbs("commercial", "skyscraper", &asset_server);
+    let industrial = load_glbs("industrial", "building", &asset_server);
+
+    let has_models = !residential.is_empty() || !commercial.is_empty() || !industrial.is_empty();
+    if has_models {
+        info!("Building models: {} residential, {} commercial ({} skyscrapers), {} industrial",
+            residential.len(), commercial.len(), commercial_large.len(), industrial.len());
     } else {
-        info!("No building models at assets/models/buildings/ — using cube fallback");
+        info!("No building models found — using cube fallback");
     }
 
     // Store resources
@@ -575,8 +574,10 @@ fn setup(
         materials: cube_materials,
     });
     commands.insert_resource(BuildingModelPool {
-        models: model_pool,
-        loaded: false,
+        residential,
+        commercial,
+        commercial_large,
+        industrial,
         has_models,
     });
 
@@ -1023,18 +1024,32 @@ fn update_buildings(
         let world_x = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
         let world_z = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
 
-        // Try GLTF model first
-        let variant = cell.style;
+        // Try GLTF model first — pick from the right pool based on tile type
         if model_pool.has_models {
-            // Try exact variant, then fall back to variant 0
-            let model = model_pool.models.get(&(cell.tile, stage, variant))
-                .or_else(|| model_pool.models.get(&(cell.tile, stage, 0)))
-                .or_else(|| model_pool.models.get(&(cell.tile, 0, 0)));
+            let models = match cell.tile {
+                TileType::Residential => &model_pool.residential,
+                TileType::Commercial if stage >= 2 && !model_pool.commercial_large.is_empty() => {
+                    &model_pool.commercial_large
+                }
+                TileType::Commercial => &model_pool.commercial,
+                TileType::Industrial => &model_pool.industrial,
+                _ => &model_pool.residential, // infrastructure fallback
+            };
 
-            if let Some(scene_handle) = model {
+            if !models.is_empty() {
+                // Pick model by hashing col+row+style for variety
+                let idx = (col * 31 + row * 17 + cell.style as usize) % models.len();
+                let scene_handle = &models[idx];
+                // Scale based on building stage
+                let model_scale = match stage {
+                    0 => 0.35,
+                    1 => 0.55,
+                    _ => 0.8,
+                };
                 commands.spawn((
                     SceneRoot(scene_handle.clone()),
-                    Transform::from_xyz(world_x, base_y, world_z),
+                    Transform::from_xyz(world_x, base_y, world_z)
+                        .with_scale(Vec3::splat(model_scale)),
                     BuildingMarker { col, row },
                 ));
                 continue;
