@@ -95,8 +95,8 @@ impl TileType {
             TileType::WaterTower => 6.0,
             TileType::WaterMain => 0.0,
             TileType::Monument => 12.0,
-            TileType::Fire => 0.0,
-            TileType::Rubble => 0.0,
+            TileType::Fire => 1.0,
+            TileType::Rubble => 1.0, // Abandoned building stays visible
         }
     }
 

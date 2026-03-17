@@ -495,6 +495,7 @@ fn setup(
     let building_types = [
         TileType::Residential, TileType::Commercial, TileType::Industrial,
         TileType::PowerPlant, TileType::WaterTower, TileType::Monument,
+        TileType::Rubble, TileType::Fire,
     ];
     for &tile_type in &building_types {
         let (r, g, b) = tile_type.color();
@@ -1110,26 +1111,26 @@ fn update_buildings(
 
         // Try GLTF model first — pick from the right pool based on tile type
         if model_pool.models_ready {
-            let models = match cell.tile {
-                TileType::Residential => &model_pool.residential,
+            // Rubble/Fire use a small residential model (abandoned look)
+            let (models, scale_override) = match cell.tile {
+                TileType::Rubble | TileType::Fire => (&model_pool.residential, Some(0.25)),
+                TileType::Residential => (&model_pool.residential, None),
                 TileType::Commercial if stage >= 2 && !model_pool.commercial_large.is_empty() => {
-                    &model_pool.commercial_large
+                    (&model_pool.commercial_large, None)
                 }
-                TileType::Commercial => &model_pool.commercial,
-                TileType::Industrial => &model_pool.industrial,
-                _ => &model_pool.residential, // infrastructure fallback
+                TileType::Commercial => (&model_pool.commercial, None),
+                TileType::Industrial => (&model_pool.industrial, None),
+                _ => (&model_pool.residential, None), // infrastructure fallback
             };
 
             if !models.is_empty() {
-                // Pick model by hashing col+row+style for variety
                 let idx = (col * 31 + row * 17 + cell.style as usize) % models.len();
                 let scene_handle = &models[idx];
-                // Scale based on building stage
-                let model_scale = match stage {
+                let model_scale = scale_override.unwrap_or(match stage {
                     0 => 0.35,
                     1 => 0.55,
                     _ => 0.8,
-                };
+                });
                 commands.spawn((
                     SceneRoot(scene_handle.clone()),
                     Transform::from_xyz(world_x, base_y, world_z)
@@ -1323,7 +1324,7 @@ fn spawn_trees_for_cell(
         let variant_idx = (col * 7 + row * 13 + i) % num_variants;
 
         let scale_seed = ((seed * 1103515245 + 12345) & 0xFFFF) as f32 / 65535.0;
-        let scale = 0.25 + scale_seed * 0.25; // 0.25 to 0.5 (Kenney models are large)
+        let scale = 0.5 + scale_seed * 0.5; // 0.5 to 1.0
 
         if tree_pool.use_gltf {
             let scene = &tree_pool.scenes[variant_idx];

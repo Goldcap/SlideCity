@@ -102,18 +102,18 @@ fn rule_residential(
     let com_nearby = grid.count_neighbors(col, row, 3, TileType::Commercial);
     let decay = config.decay_multiplier;
 
-    // Pollution decay
-    if ind_nearby >= 4 && park_nearby == 0 && rng.gen::<f32>() < 0.02 * decay {
+    // Pollution decay (very rare — need heavy industrial AND no parks)
+    if ind_nearby >= 5 && park_nearby == 0 && rng.gen::<f32>() < 0.004 * decay {
         return Some(TileType::Rubble);
     }
 
-    // Power abandonment
-    if !cell.has_power && cell.age > 40 && rng.gen::<f32>() < 0.006 * decay {
+    // Power abandonment (slow — give mayor time to build power)
+    if !cell.has_power && cell.age > 80 && rng.gen::<f32>() < 0.002 * decay {
         return Some(TileType::Rubble);
     }
 
-    // Water abandonment
-    if !cell.has_water && cell.age > 50 && rng.gen::<f32>() < 0.004 * decay {
+    // Water abandonment (very slow)
+    if !cell.has_water && cell.age > 100 && rng.gen::<f32>() < 0.001 * decay {
         return Some(TileType::Rubble);
     }
 
@@ -133,13 +133,13 @@ fn rule_commercial(
     let res_nearby = grid.count_neighbors(col, row, 4, TileType::Residential);
     let decay = config.decay_multiplier;
 
-    // No customers
-    if res_nearby < 2 && cell.age > 20 && rng.gen::<f32>() < 0.015 * decay {
+    // No customers (slower — give time for residential to grow nearby)
+    if res_nearby < 2 && cell.age > 50 && rng.gen::<f32>() < 0.004 * decay {
         return Some(TileType::Rubble);
     }
 
     // No power
-    if !cell.has_power && cell.age > 25 && rng.gen::<f32>() < 0.01 * decay {
+    if !cell.has_power && cell.age > 60 && rng.gen::<f32>() < 0.003 * decay {
         return Some(TileType::Rubble);
     }
 
@@ -160,8 +160,8 @@ fn rule_industrial(
         return Some(TileType::Commercial);
     }
 
-    // No power
-    if !cell.has_power && cell.age > 30 && rng.gen::<f32>() < 0.007 * decay {
+    // No power (industrial is more tolerant)
+    if !cell.has_power && cell.age > 60 && rng.gen::<f32>() < 0.003 * decay {
         return Some(TileType::Rubble);
     }
 
@@ -202,10 +202,10 @@ fn rule_fire(
     None
 }
 
-/// Rubble: eventually clears to empty.
+/// Rubble: eventually clears to empty (slow — abandoned buildings linger).
 fn rule_rubble(cell: &Cell, config: &SimConfig, rng: &mut SmallRng) -> Option<TileType> {
     let decay = config.decay_multiplier;
-    if cell.age > 25 && rng.gen::<f32>() < 0.06 / decay {
+    if cell.age > 60 && rng.gen::<f32>() < 0.015 / decay {
         return Some(TileType::Empty);
     }
     None
