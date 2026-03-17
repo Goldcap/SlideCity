@@ -549,10 +549,10 @@ fn setup(
 
     let has_models = !residential.is_empty() || !commercial.is_empty() || !industrial.is_empty();
     if has_models {
-        info!("Building models: {} residential, {} commercial ({} skyscrapers), {} industrial",
+        eprintln!("[SlideCity] Building models found: {} residential, {} commercial ({} skyscrapers), {} industrial",
             residential.len(), commercial.len(), commercial_large.len(), industrial.len());
     } else {
-        info!("No building models found — using cube fallback");
+        eprintln!("[SlideCity] No building models found in assets/models/buildings/ — using cube fallback");
     }
 
     // Store resources
@@ -993,28 +993,47 @@ fn check_models_loaded(
     asset_server: Res<AssetServer>,
     mut prev_state: ResMut<PreviousCellState>,
     grid_res: Res<GameGrid>,
+    mut frame_count: Local<u32>,
 ) {
     if !model_pool.has_models || model_pool.models_ready {
         return;
     }
 
-    // Check if the first residential model is loaded as a proxy
-    let sample = model_pool.residential.first()
-        .or(model_pool.commercial.first())
-        .or(model_pool.industrial.first());
+    *frame_count += 1;
 
-    if let Some(handle) = sample {
-        if asset_server.is_loaded_with_dependencies(handle.id()) {
-            info!("Building models loaded — rebuilding all buildings with GLTF models");
-            model_pool.models_ready = true;
-            // Mark ALL building cells as dirty to force a full rebuild
-            let grid = &grid_res.grid;
-            for row in 0..grid.height {
-                for col in 0..grid.width {
-                    let cell = grid.get(col, row);
-                    if cell.tile.height_floors(cell.age) > 0.0 {
-                        prev_state.dirty.insert((col, row));
-                    }
+    // Check all model handles for loading status
+    let all_handles: Vec<_> = model_pool.residential.iter()
+        .chain(model_pool.commercial.iter())
+        .chain(model_pool.commercial_large.iter())
+        .chain(model_pool.industrial.iter())
+        .collect();
+
+    if all_handles.is_empty() {
+        return;
+    }
+
+    let loaded_count = all_handles.iter()
+        .filter(|h| asset_server.is_loaded_with_dependencies(h.id()))
+        .count();
+
+    // Log progress every 60 frames (~1 second)
+    if *frame_count % 60 == 0 {
+        eprintln!("[SlideCity] Model loading: {}/{} loaded (frame {})",
+            loaded_count, all_handles.len(), *frame_count);
+    }
+
+    // Consider ready once at least half are loaded (don't wait for stragglers)
+    if loaded_count > all_handles.len() / 2 {
+        eprintln!("[SlideCity] Building models ready ({}/{}) — rebuilding all buildings",
+            loaded_count, all_handles.len());
+        model_pool.models_ready = true;
+        // Mark ALL building cells as dirty to force a full rebuild
+        let grid = &grid_res.grid;
+        for row in 0..grid.height {
+            for col in 0..grid.width {
+                let cell = grid.get(col, row);
+                if cell.tile.height_floors(cell.age) > 0.0 {
+                    prev_state.dirty.insert((col, row));
                 }
             }
         }
