@@ -94,6 +94,8 @@ struct BuildingModelPool {
     industrial: Vec<Handle<Scene>>,
     /// True if any model files were found at startup
     has_models: bool,
+    /// Set to true once models are confirmed loaded — triggers a full building rebuild
+    models_ready: bool,
 }
 
 /// Road network mesh entity + reusable buffers.
@@ -361,7 +363,8 @@ fn main() {
             simulation_tick.in_set(GameSet::Sim),
             compute_dirty_cells.in_set(GameSet::DirtyCompute),
             update_terrain_mesh.in_set(GameSet::Render),
-            update_buildings.in_set(GameSet::Render),
+            check_models_loaded.in_set(GameSet::Render),
+            update_buildings.in_set(GameSet::Render).after(check_models_loaded),
             spawn_trees.in_set(GameSet::Render),
             update_road_mesh.in_set(GameSet::Render),
             tree_lod_update,
@@ -579,6 +582,7 @@ fn setup(
         commercial_large,
         industrial,
         has_models,
+        models_ready: false,
     });
 
     // Create procedural tree variants for instanced rendering
@@ -817,15 +821,9 @@ fn corner_height(grid: &Grid, col: usize, row: usize, scale: f32) -> f32 {
     }
 
     if has_road {
-        // Flatten: blend terrain toward road height for smooth contouring
-        let road_avg = road_height_sum / road_count;
-        let terrain_avg = if count > road_count {
-            (sum - road_height_sum) / (count - road_count)
-        } else {
-            road_avg
-        };
-        // Blend heavily toward road height (80% road, 20% terrain)
-        road_avg * 0.8 + terrain_avg * 0.2
+        // Flatten: terrain corners touching roads snap to the road height.
+        // This creates SC4-style smooth road contouring.
+        road_height_sum / road_count
     } else if count > 0.0 {
         sum / count
     } else {
@@ -989,6 +987,40 @@ struct BuildingMarker {
 /// Incremental building update: only despawn/respawn buildings for dirty cells.
 /// Uses shared CubeFallbackHandles to avoid per-entity asset allocation.
 /// Will use GLTF models from BuildingModelPool when available.
+/// Check if GLTF models finished loading; if so, despawn all cubes and rebuild with models.
+fn check_models_loaded(
+    mut model_pool: ResMut<BuildingModelPool>,
+    asset_server: Res<AssetServer>,
+    mut prev_state: ResMut<PreviousCellState>,
+    grid_res: Res<GameGrid>,
+) {
+    if !model_pool.has_models || model_pool.models_ready {
+        return;
+    }
+
+    // Check if the first residential model is loaded as a proxy
+    let sample = model_pool.residential.first()
+        .or(model_pool.commercial.first())
+        .or(model_pool.industrial.first());
+
+    if let Some(handle) = sample {
+        if asset_server.is_loaded_with_dependencies(handle.id()) {
+            info!("Building models loaded — rebuilding all buildings with GLTF models");
+            model_pool.models_ready = true;
+            // Mark ALL building cells as dirty to force a full rebuild
+            let grid = &grid_res.grid;
+            for row in 0..grid.height {
+                for col in 0..grid.width {
+                    let cell = grid.get(col, row);
+                    if cell.tile.height_floors(cell.age) > 0.0 {
+                        prev_state.dirty.insert((col, row));
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn update_buildings(
     mut commands: Commands,
     grid_res: Res<GameGrid>,
@@ -1025,7 +1057,7 @@ fn update_buildings(
         let world_z = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
 
         // Try GLTF model first — pick from the right pool based on tile type
-        if model_pool.has_models {
+        if model_pool.models_ready {
             let models = match cell.tile {
                 TileType::Residential => &model_pool.residential,
                 TileType::Commercial if stage >= 2 && !model_pool.commercial_large.is_empty() => {
