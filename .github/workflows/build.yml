@@ -68,19 +68,26 @@ jobs:
           echo "Downloading City Kit (Suburban)..."
           curl -sL -o "$TMP/suburban.zip" "https://kenney.nl/media/pages/assets/city-kit-suburban/167f6dbc31-1745479373/kenney_city-kit-suburban_20.zip"
           unzip -o -q "$TMP/suburban.zip" -d "$TMP/suburban"
-          find "$TMP/suburban" -name "*.glb" -exec cp {} assets/models/buildings/residential/ \;
+          find "$TMP/suburban" -path "*/GLB format/*.glb" -exec cp {} assets/models/buildings/residential/ \;
+          mkdir -p assets/models/buildings/residential/Textures
+          find "$TMP/suburban" -path "*/GLB format/Textures/*" -exec cp {} assets/models/buildings/residential/Textures/ \;
 
           echo "Downloading City Kit (Commercial)..."
           curl -sL -o "$TMP/commercial.zip" "https://kenney.nl/media/pages/assets/city-kit-commercial/16eb35d771-1753115042/kenney_city-kit-commercial_2.1.zip"
           unzip -o -q "$TMP/commercial.zip" -d "$TMP/commercial"
-          find "$TMP/commercial" -name "*.glb" -exec cp {} assets/models/buildings/commercial/ \;
+          find "$TMP/commercial" -path "*/GLB format/*.glb" -exec cp {} assets/models/buildings/commercial/ \;
+          mkdir -p assets/models/buildings/commercial/Textures
+          find "$TMP/commercial" -path "*/GLB format/Textures/*" -exec cp {} assets/models/buildings/commercial/Textures/ \;
 
           echo "Downloading City Kit (Industrial)..."
           curl -sL -o "$TMP/industrial.zip" "https://kenney.nl/media/pages/assets/city-kit-industrial/1c9d714428-1750838303/kenney_city-kit-industrial_1.0.zip"
           unzip -o -q "$TMP/industrial.zip" -d "$TMP/industrial"
-          find "$TMP/industrial" -name "*.glb" -exec cp {} assets/models/buildings/industrial/ \;
+          find "$TMP/industrial" -path "*/GLB format/*.glb" -exec cp {} assets/models/buildings/industrial/ \;
+          mkdir -p assets/models/buildings/industrial/Textures
+          find "$TMP/industrial" -path "*/GLB format/Textures/*" -exec cp {} assets/models/buildings/industrial/Textures/ \;
 
           echo "Models: $(find assets/models/buildings -name '*.glb' | wc -l) GLB files"
+          echo "Textures: $(find assets/models/buildings -name '*.png' | wc -l) texture files"
           rm -rf "$TMP"
 
       - name: Package binary + assets

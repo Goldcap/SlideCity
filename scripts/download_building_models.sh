@@ -54,11 +54,26 @@ unzip -o -q "$INDUSTRIAL_ZIP" -d "$TMP_DIR/industrial"
 echo ""
 echo "=== Organizing GLB files ==="
 
-# Copy GLB files to the right directories
-# Kenney packs have GLB files in a Models/GLTF format/ subdirectory
-find "$TMP_DIR/suburban" -name "*.glb" -exec cp {} "$ASSET_DIR/residential/" \;
-find "$TMP_DIR/commercial" -name "*.glb" -exec cp {} "$ASSET_DIR/commercial/" \;
-find "$TMP_DIR/industrial" -name "*.glb" -exec cp {} "$ASSET_DIR/industrial/" \;
+# Copy GLB files AND their textures to the right directories
+# Kenney GLBs reference "Textures/colormap.png" relative to themselves
+for pack_dir in suburban commercial industrial; do
+    case "$pack_dir" in
+        suburban)   dest="residential" ;;
+        commercial) dest="commercial" ;;
+        industrial) dest="industrial" ;;
+    esac
+
+    # Copy GLB files
+    find "$TMP_DIR/$pack_dir" -path "*/GLB format/*.glb" -exec cp {} "$ASSET_DIR/$dest/" \;
+
+    # Copy texture files (required by GLBs)
+    glb_tex_dir=$(find "$TMP_DIR/$pack_dir" -path "*/GLB format/Textures" -type d | head -1)
+    if [ -n "$glb_tex_dir" ]; then
+        mkdir -p "$ASSET_DIR/$dest/Textures"
+        cp "$glb_tex_dir"/* "$ASSET_DIR/$dest/Textures/" 2>/dev/null || true
+        echo "  Copied textures for $dest"
+    fi
+done
 
 echo ""
 echo "Residential models: $(ls "$ASSET_DIR/residential/"*.glb 2>/dev/null | wc -l)"
