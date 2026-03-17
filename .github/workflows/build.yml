@@ -86,8 +86,14 @@ jobs:
           mkdir -p assets/models/buildings/industrial/Textures
           find "$TMP/industrial" -path "*/GLB format/Textures/*" -exec cp {} assets/models/buildings/industrial/Textures/ \;
 
-          echo "Models: $(find assets/models/buildings -name '*.glb' | wc -l) GLB files"
-          echo "Textures: $(find assets/models/buildings -name '*.png' | wc -l) texture files"
+          # Copy tree models from suburban pack to dedicated trees directory
+          mkdir -p assets/models/trees/Textures
+          cp assets/models/buildings/residential/tree-large.glb assets/models/trees/
+          cp assets/models/buildings/residential/tree-small.glb assets/models/trees/
+          cp assets/models/buildings/residential/Textures/colormap.png assets/models/trees/Textures/
+
+          echo "Models: $(find assets/models -name '*.glb' | wc -l) GLB files"
+          echo "Textures: $(find assets/models -name '*.png' | wc -l) texture files"
           rm -rf "$TMP"
 
       - name: Package binary + assets

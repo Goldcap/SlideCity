@@ -75,10 +75,18 @@ for pack_dir in suburban commercial industrial; do
     fi
 done
 
+# Copy tree models to dedicated directory
+TREE_DIR="assets/models/trees"
+mkdir -p "$TREE_DIR/Textures"
+cp "$ASSET_DIR/residential/tree-large.glb" "$TREE_DIR/" 2>/dev/null || true
+cp "$ASSET_DIR/residential/tree-small.glb" "$TREE_DIR/" 2>/dev/null || true
+cp "$ASSET_DIR/residential/Textures/colormap.png" "$TREE_DIR/Textures/" 2>/dev/null || true
+
 echo ""
 echo "Residential models: $(ls "$ASSET_DIR/residential/"*.glb 2>/dev/null | wc -l)"
 echo "Commercial models:  $(ls "$ASSET_DIR/commercial/"*.glb 2>/dev/null | wc -l)"
 echo "Industrial models:  $(ls "$ASSET_DIR/industrial/"*.glb 2>/dev/null | wc -l)"
+echo "Tree models:        $(ls "$TREE_DIR/"*.glb 2>/dev/null | wc -l)"
 echo ""
 echo "=== Done! Models saved to $ASSET_DIR ==="
 echo ""

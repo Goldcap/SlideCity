@@ -106,12 +106,16 @@ struct RoadMeshRes {
     entity: Entity,
 }
 
-/// Pre-loaded tree mesh+material handles for instanced rendering.
-/// Uses flat Mesh3d entities (NOT SceneRoot) for guaranteed GPU instancing.
+/// Pre-loaded tree scene handles. Uses Kenney GLTF models when available,
+/// falls back to procedural cone meshes.
 #[derive(Resource)]
-struct TreeMeshPool {
-    /// (mesh, material) per variant — all trees of same variant share handles
-    variants: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+struct TreeModelPool {
+    /// Scene handles for GLTF tree models (SceneRoot spawning)
+    scenes: Vec<Handle<Scene>>,
+    /// Fallback: procedural cone mesh+material handles (Mesh3d spawning)
+    procedural: Vec<(Handle<Mesh>, Handle<StandardMaterial>)>,
+    /// True when using GLTF models
+    use_gltf: bool,
 }
 
 #[derive(Component)]
@@ -585,10 +589,39 @@ fn setup(
         models_ready: false,
     });
 
-    // Create procedural tree variants for instanced rendering
-    let tree_variants = create_tree_variants(&mut meshes, &mut materials);
-    info!("Created {} procedural tree variants", tree_variants.len());
-    commands.insert_resource(TreeMeshPool { variants: tree_variants });
+    // Load Kenney tree models or fall back to procedural cones
+    let tree_dir = Path::new("assets/models/trees");
+    let mut tree_scenes = Vec::new();
+    if tree_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(tree_dir) {
+            let mut files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".glb"))
+                .collect();
+            files.sort_by_key(|e| e.file_name());
+            for entry in &files {
+                let path = format!("models/trees/{}#Scene0", entry.file_name().to_string_lossy());
+                let handle: Handle<Scene> = asset_server.load(&path);
+                eprintln!("[SlideCity] Loaded tree model: {}", entry.file_name().to_string_lossy());
+                tree_scenes.push(handle);
+            }
+        }
+    }
+
+    let use_gltf_trees = !tree_scenes.is_empty();
+    let procedural_trees = if use_gltf_trees {
+        eprintln!("[SlideCity] Using {} Kenney tree models", tree_scenes.len());
+        Vec::new()
+    } else {
+        eprintln!("[SlideCity] No tree models found — using procedural cones");
+        create_tree_variants(&mut meshes, &mut materials)
+    };
+
+    commands.insert_resource(TreeModelPool {
+        scenes: tree_scenes,
+        procedural: procedural_trees,
+        use_gltf: use_gltf_trees,
+    });
     commands.insert_resource(TreeLodTimer(Timer::from_seconds(0.5, TimerMode::Repeating)));
 
     // Road network mesh (starts empty, rebuilt when roads are placed)
@@ -1217,7 +1250,7 @@ fn spawn_trees(
     mut commands: Commands,
     grid_res: Res<GameGrid>,
     prev_state: Res<PreviousCellState>,
-    tree_pool: Res<TreeMeshPool>,
+    tree_pool: Res<TreeModelPool>,
     existing: Query<(Entity, &TreeMarker)>,
     mut initial_spawn_done: Local<bool>,
 ) {
@@ -1228,28 +1261,28 @@ fn spawn_trees(
     }
 
     let grid = &grid_res.grid;
-    let num_variants = tree_pool.variants.len();
+    let num_variants = if tree_pool.use_gltf {
+        tree_pool.scenes.len()
+    } else {
+        tree_pool.procedural.len()
+    };
     if num_variants == 0 {
         return;
     }
 
     if full_spawn {
         *initial_spawn_done = true;
-        // Spawn trees for all forest cells
         for row in 0..grid.height {
             for col in 0..grid.width {
                 spawn_trees_for_cell(&mut commands, grid, col, row, &tree_pool, num_variants);
             }
         }
     } else {
-        // Only handle dirty cells
-        // Despawn trees on dirty cells that are no longer forest
         for (entity, marker) in &existing {
             if prev_state.dirty.contains(&(marker.col, marker.row)) {
                 commands.entity(entity).despawn();
             }
         }
-        // Respawn trees on dirty cells that are now forest
         for &(col, row) in &prev_state.dirty {
             spawn_trees_for_cell(&mut commands, grid, col, row, &tree_pool, num_variants);
         }
@@ -1261,12 +1294,11 @@ fn spawn_trees_for_cell(
     grid: &Grid,
     col: usize,
     row: usize,
-    tree_pool: &TreeMeshPool,
+    tree_pool: &TreeModelPool,
     num_variants: usize,
 ) {
     let cell = grid.get(col, row);
 
-    // Only empty cells with forest terrain get trees
     if cell.tile != TileType::Empty {
         return;
     }
@@ -1279,33 +1311,38 @@ fn spawn_trees_for_cell(
 
     let base_y = cell.terrain_height * HEIGHT_SCALE;
 
-    // Deterministic pseudo-random placement seeded by cell position
     for i in 0..tree_count {
-        // Simple hash for position within cell
         let seed = (col * 7919 + row * 6271 + i * 3571) as u32;
-        let fx = ((seed * 2654435761) & 0xFFFF) as f32 / 65535.0; // 0..1
-        let fz = ((seed * 2246822519) & 0xFFFF) as f32 / 65535.0; // 0..1
+        let fx = ((seed * 2654435761) & 0xFFFF) as f32 / 65535.0;
+        let fz = ((seed * 2246822519) & 0xFFFF) as f32 / 65535.0;
 
-        // Position within cell (with margin to avoid edges)
         let margin = 0.15;
         let x = col as f32 * TILE_SIZE + margin + fx * (TILE_SIZE - 2.0 * margin);
         let z = row as f32 * TILE_SIZE + margin + fz * (TILE_SIZE - 2.0 * margin);
 
-        // Variant selection
         let variant_idx = (col * 7 + row * 13 + i) % num_variants;
-        let (ref mesh, ref mat) = tree_pool.variants[variant_idx];
 
-        // Small random scale variation
         let scale_seed = ((seed * 1103515245 + 12345) & 0xFFFF) as f32 / 65535.0;
-        let scale = 0.7 + scale_seed * 0.6; // 0.7 to 1.3
+        let scale = 0.25 + scale_seed * 0.25; // 0.25 to 0.5 (Kenney models are large)
 
-        commands.spawn((
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_xyz(x, base_y, z)
-                .with_scale(Vec3::splat(scale)),
-            TreeMarker { col, row },
-        ));
+        if tree_pool.use_gltf {
+            let scene = &tree_pool.scenes[variant_idx];
+            commands.spawn((
+                SceneRoot(scene.clone()),
+                Transform::from_xyz(x, base_y, z)
+                    .with_scale(Vec3::splat(scale)),
+                TreeMarker { col, row },
+            ));
+        } else {
+            let (ref mesh, ref mat) = tree_pool.procedural[variant_idx];
+            commands.spawn((
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(mat.clone()),
+                Transform::from_xyz(x, base_y, z)
+                    .with_scale(Vec3::splat(scale * 3.0)),
+                TreeMarker { col, row },
+            ));
+        }
     }
 }
 
