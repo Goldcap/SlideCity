@@ -86,11 +86,24 @@ jobs:
           mkdir -p assets/models/buildings/industrial/Textures
           find "$TMP/industrial" -path "*/GLB format/Textures/*" -exec cp {} assets/models/buildings/industrial/Textures/ \;
 
+          # Generate abandoned (brown-tinted) colormap for rubble buildings
+          python3 -c "
+          from PIL import Image, ImageEnhance
+          img = Image.open('assets/models/buildings/residential/Textures/colormap.png').convert('RGB')
+          dark = ImageEnhance.Brightness(img).enhance(0.4)
+          brown = Image.new('RGB', dark.size, (80, 55, 30))
+          result = Image.blend(dark, brown, 0.4)
+          for d in ['residential', 'commercial', 'industrial']:
+              result.save(f'assets/models/buildings/{d}/Textures/colormap_abandoned.png')
+          print('Created abandoned colormap textures')
+          " || echo "PIL not available — skipping abandoned texture"
+
           # Copy tree models from suburban pack to dedicated trees directory
           mkdir -p assets/models/trees/Textures
           cp assets/models/buildings/residential/tree-large.glb assets/models/trees/
           cp assets/models/buildings/residential/tree-small.glb assets/models/trees/
           cp assets/models/buildings/residential/Textures/colormap.png assets/models/trees/Textures/
+          cp assets/models/buildings/residential/Textures/colormap_abandoned.png assets/models/trees/Textures/ 2>/dev/null || true
 
           echo "Models: $(find assets/models -name '*.glb' | wc -l) GLB files"
           echo "Textures: $(find assets/models -name '*.png' | wc -l) texture files"

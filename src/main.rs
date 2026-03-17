@@ -73,6 +73,10 @@ fn age_stage(age: u8) -> u8 {
     if age < 16 { 0 } else if age < 46 { 1 } else { 2 }
 }
 
+/// Material handle for abandoned buildings (brown-tinted colormap).
+#[derive(Resource)]
+struct AbandonedMaterial(Handle<StandardMaterial>);
+
 /// Pre-allocated shared mesh and material handles for cube fallback buildings.
 /// Eliminates the 10K+ handle-per-tick leak in the old update_buildings.
 #[derive(Resource)]
@@ -587,6 +591,25 @@ fn setup(
         eprintln!("[SlideCity] No building models found in assets/models/buildings/ — using cube fallback");
     }
 
+    // Abandoned building material — brown-tinted colormap texture
+    let abandoned_tex_path = "models/buildings/residential/Textures/colormap_abandoned.png";
+    let abandoned_mat = if Path::new("assets").join(abandoned_tex_path).exists() {
+        let tex: Handle<Image> = asset_server.load(abandoned_tex_path);
+        materials.add(StandardMaterial {
+            base_color_texture: Some(tex),
+            perceptual_roughness: 0.9,
+            ..default()
+        })
+    } else {
+        // Fallback: plain brown material
+        materials.add(StandardMaterial {
+            base_color: Color::srgb(0.35, 0.25, 0.15),
+            perceptual_roughness: 0.9,
+            ..default()
+        })
+    };
+    commands.insert_resource(AbandonedMaterial(abandoned_mat));
+
     // Store resources
     let prev_state = PreviousCellState::from_grid(&grid);
     commands.insert_resource(GameGrid { grid, next_grid });
@@ -662,7 +685,7 @@ fn setup(
     let road_entity = commands.spawn((
         Mesh3d(road_mesh_handle.clone()),
         MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.3, 0.3, 0.3),
+            base_color: Color::srgb(0.45, 0.45, 0.47),
             perceptual_roughness: 0.95,
             metallic: 0.0,
             ..default()
@@ -1147,6 +1170,7 @@ fn update_buildings(
     grid_res: Res<GameGrid>,
     prev_state: Res<PreviousCellState>,
     cube_handles: Res<CubeFallbackHandles>,
+    abandoned_mat: Res<AbandonedMaterial>,
     model_pool: Res<BuildingModelPool>,
     existing: Query<(Entity, &BuildingMarker)>,
 ) {
@@ -1177,32 +1201,43 @@ fn update_buildings(
         let world_x = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
         let world_z = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
 
+        // Abandoned/Fire buildings: brown cube at building height (SC4-style damaged look)
+        if cell.tile == TileType::Rubble || cell.tile == TileType::Fire {
+            let h = 0.4 * 2.0; // small abandoned building height
+            if let Some(mesh) = cube_handles.meshes.get(&(TileType::Residential, 0)) {
+                commands.spawn((
+                    Mesh3d(mesh.clone()),
+                    MeshMaterial3d(abandoned_mat.0.clone()),
+                    Transform::from_xyz(world_x, base_y + h / 2.0, world_z),
+                    BuildingMarker { col, row },
+                ));
+            }
+            continue;
+        }
+
         // Try GLTF model first — pick from the right pool based on tile type
         if model_pool.models_ready {
-            // Rubble/Fire keep a building model visible (abandoned look — sunken + smaller)
-            let (models, scale_override, y_offset) = match cell.tile {
-                TileType::Rubble => (&model_pool.residential, Some(0.30), -0.05),
-                TileType::Fire => (&model_pool.residential, Some(0.30), 0.0),
-                TileType::Residential => (&model_pool.residential, None, 0.0),
+            let models = match cell.tile {
+                TileType::Residential => &model_pool.residential,
                 TileType::Commercial if stage >= 2 && !model_pool.commercial_large.is_empty() => {
-                    (&model_pool.commercial_large, None, 0.0)
+                    &model_pool.commercial_large
                 }
-                TileType::Commercial => (&model_pool.commercial, None, 0.0),
-                TileType::Industrial => (&model_pool.industrial, None, 0.0),
-                _ => (&model_pool.residential, None, 0.0), // infrastructure fallback
+                TileType::Commercial => &model_pool.commercial,
+                TileType::Industrial => &model_pool.industrial,
+                _ => &model_pool.residential,
             };
 
             if !models.is_empty() {
                 let idx = (col * 31 + row * 17 + cell.style as usize) % models.len();
                 let scene_handle = &models[idx];
-                let model_scale = scale_override.unwrap_or(match stage {
+                let model_scale = match stage {
                     0 => 0.35,
                     1 => 0.55,
                     _ => 0.8,
-                });
+                };
                 commands.spawn((
                     SceneRoot(scene_handle.clone()),
-                    Transform::from_xyz(world_x, base_y + y_offset, world_z)
+                    Transform::from_xyz(world_x, base_y, world_z)
                         .with_scale(Vec3::splat(model_scale)),
                     BuildingMarker { col, row },
                 ));
@@ -1491,8 +1526,27 @@ fn road_neighbor_mask(grid: &Grid, col: usize, row: usize) -> u8 {
     mask
 }
 
-/// Generate road mesh geometry for a single cell.
-/// Uses a full-cell-width quad with neighbor-matched edge heights for seamless connections.
+/// Road half-width (narrower than full cell for SC4-style appearance).
+const ROAD_HALF_W: f32 = 0.35;
+
+/// Emit a quad helper.
+fn emit_quad(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    colors: &mut Vec<[f32; 4]>,
+    indices: &mut Vec<u32>,
+    corners: [[f32; 3]; 4],
+    color: [f32; 4],
+) {
+    let idx = positions.len() as u32;
+    let up = [0.0f32, 1.0, 0.0];
+    for c in &corners { positions.push(*c); }
+    for _ in 0..4 { normals.push(up); colors.push(color); }
+    indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+}
+
+/// Generate road mesh for a cell: narrow strips forming a cross/plus shape.
+/// Center intersection square + arms extending to cell edges toward road neighbors.
 fn emit_road_cell(
     grid: &Grid,
     col: usize,
@@ -1502,91 +1556,90 @@ fn emit_road_cell(
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
+    let cx = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+    let cz = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+    let y = smoothed_road_height(grid, col, row);
+    let mask = road_neighbor_mask(grid, col, row);
+
+    // Use white vertex color — the material base_color provides the gray
+    let road_col = [1.0, 1.0, 1.0, 1.0];
+    let line_col = [2.5, 2.4, 1.8, 1.0]; // Bright yellow (will be multiplied by material gray)
+
+    // Center intersection square (always present)
+    emit_quad(positions, normals, colors, indices, [
+        [cx - ROAD_HALF_W, y, cz - ROAD_HALF_W],
+        [cx + ROAD_HALF_W, y, cz - ROAD_HALF_W],
+        [cx - ROAD_HALF_W, y, cz + ROAD_HALF_W],
+        [cx + ROAD_HALF_W, y, cz + ROAD_HALF_W],
+    ], road_col);
+
+    // Arms extending to cell edges toward connected neighbors
     let x0 = col as f32 * TILE_SIZE;
     let z0 = row as f32 * TILE_SIZE;
     let x1 = x0 + TILE_SIZE;
     let z1 = z0 + TILE_SIZE;
+    let lw = 0.03; // center line width
+    let ly = y + 0.003; // line sits just above road
 
-    // Use smoothed height for this cell
-    let y = smoothed_road_height(grid, col, row);
-
-    // Match corner heights to neighbors for seamless edges:
-    // Each corner averages the smoothed heights of the up-to-4 road cells that share it.
-    let y_tl = road_corner_height(grid, col, row, 0, 0); // top-left
-    let y_tr = road_corner_height(grid, col, row, 1, 0); // top-right
-    let y_bl = road_corner_height(grid, col, row, 0, 1); // bottom-left
-    let y_br = road_corner_height(grid, col, row, 1, 1); // bottom-right
-
-    let up = [0.0f32, 1.0, 0.0];
-    let road_color = [0.30, 0.30, 0.32, 1.0]; // Uniform asphalt
-
-    // Full-cell road quad
-    let base_idx = positions.len() as u32;
-    positions.push([x0, y_tl, z0]); // TL
-    positions.push([x1, y_tr, z0]); // TR
-    positions.push([x0, y_bl, z1]); // BL
-    positions.push([x1, y_br, z1]); // BR
-    for _ in 0..4 { normals.push(up); colors.push(road_color); }
-    indices.extend_from_slice(&[base_idx, base_idx+2, base_idx+1, base_idx+1, base_idx+2, base_idx+3]);
-
-    // Center line markings (yellow dashed)
-    let cx = x0 + TILE_SIZE / 2.0;
-    let cz = z0 + TILE_SIZE / 2.0;
-    let mask = road_neighbor_mask(grid, col, row);
-    let marking_color = [0.75, 0.72, 0.55, 1.0];
-    let lw = 0.025; // line width
-    let my = y + 0.002; // slightly above road surface
-
-    // Vertical center line (N-S roads)
-    if mask & 0b1010 != 0 { // has N or S neighbor
-        let idx = positions.len() as u32;
-        positions.push([cx - lw, my, z0]);
-        positions.push([cx + lw, my, z0]);
-        positions.push([cx - lw, my, z1]);
-        positions.push([cx + lw, my, z1]);
-        for _ in 0..4 { normals.push(up); colors.push(marking_color); }
-        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+    // North arm
+    if mask & 8 != 0 {
+        emit_quad(positions, normals, colors, indices, [
+            [cx - ROAD_HALF_W, y, z0],
+            [cx + ROAD_HALF_W, y, z0],
+            [cx - ROAD_HALF_W, y, cz - ROAD_HALF_W],
+            [cx + ROAD_HALF_W, y, cz - ROAD_HALF_W],
+        ], road_col);
+        // Center line
+        emit_quad(positions, normals, colors, indices, [
+            [cx - lw, ly, z0], [cx + lw, ly, z0],
+            [cx - lw, ly, cz - ROAD_HALF_W], [cx + lw, ly, cz - ROAD_HALF_W],
+        ], line_col);
     }
 
-    // Horizontal center line (E-W roads)
-    if mask & 0b0101 != 0 { // has E or W neighbor
-        let idx = positions.len() as u32;
-        positions.push([x0, my, cz - lw]);
-        positions.push([x1, my, cz - lw]);
-        positions.push([x0, my, cz + lw]);
-        positions.push([x1, my, cz + lw]);
-        for _ in 0..4 { normals.push(up); colors.push(marking_color); }
-        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+    // South arm
+    if mask & 2 != 0 {
+        emit_quad(positions, normals, colors, indices, [
+            [cx - ROAD_HALF_W, y, cz + ROAD_HALF_W],
+            [cx + ROAD_HALF_W, y, cz + ROAD_HALF_W],
+            [cx - ROAD_HALF_W, y, z1],
+            [cx + ROAD_HALF_W, y, z1],
+        ], road_col);
+        emit_quad(positions, normals, colors, indices, [
+            [cx - lw, ly, cz + ROAD_HALF_W], [cx + lw, ly, cz + ROAD_HALF_W],
+            [cx - lw, ly, z1], [cx + lw, ly, z1],
+        ], line_col);
+    }
+
+    // East arm
+    if mask & 4 != 0 {
+        emit_quad(positions, normals, colors, indices, [
+            [cx + ROAD_HALF_W, y, cz - ROAD_HALF_W],
+            [x1, y, cz - ROAD_HALF_W],
+            [cx + ROAD_HALF_W, y, cz + ROAD_HALF_W],
+            [x1, y, cz + ROAD_HALF_W],
+        ], road_col);
+        emit_quad(positions, normals, colors, indices, [
+            [cx + ROAD_HALF_W, ly, cz - lw], [x1, ly, cz - lw],
+            [cx + ROAD_HALF_W, ly, cz + lw], [x1, ly, cz + lw],
+        ], line_col);
+    }
+
+    // West arm
+    if mask & 1 != 0 {
+        emit_quad(positions, normals, colors, indices, [
+            [x0, y, cz - ROAD_HALF_W],
+            [cx - ROAD_HALF_W, y, cz - ROAD_HALF_W],
+            [x0, y, cz + ROAD_HALF_W],
+            [cx - ROAD_HALF_W, y, cz + ROAD_HALF_W],
+        ], road_col);
+        emit_quad(positions, normals, colors, indices, [
+            [x0, ly, cz - lw], [cx - ROAD_HALF_W, ly, cz - lw],
+            [x0, ly, cz + lw], [cx - ROAD_HALF_W, ly, cz + lw],
+        ], line_col);
     }
 }
 
-/// Compute road corner height by averaging smoothed heights of road cells sharing this corner.
-/// corner_dx/corner_dy: 0=left/top, 1=right/bottom
-fn road_corner_height(grid: &Grid, col: usize, row: usize, corner_dx: usize, corner_dy: usize) -> f32 {
-    let mut sum = 0.0;
-    let mut count = 0.0;
 
-    // The 4 cells that share this corner
-    for dr in [0usize.wrapping_sub(1), 0] {
-        for dc in [0usize.wrapping_sub(1), 0] {
-            let c = (col + corner_dx).wrapping_add(dc);
-            let r = (row + corner_dy).wrapping_add(dr);
-            if c < grid.width && r < grid.height {
-                let cell = grid.get(c, r);
-                if cell.tile == TileType::Road {
-                    sum += smoothed_road_height(grid, c, r);
-                    count += 1.0;
-                } else {
-                    // Non-road neighbors: use the base terrain height so road
-                    // edges blend with terrain
-                    sum += cell.terrain_height * HEIGHT_SCALE + ROAD_Y_OFFSET;
-                    count += 1.0;
-                }
-            }
-        }
-    }
-    if count > 0.0 { sum / count } else { smoothed_road_height(grid, col, row) }
-}
 
 /// Full rebuild of the road network mesh from grid state.
 fn build_road_mesh(grid: &Grid) -> Mesh {
