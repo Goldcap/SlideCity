@@ -59,12 +59,36 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Download Kenney building models (CC0)
+        shell: bash
+        run: |
+          mkdir -p assets/models/buildings/{residential,commercial,industrial}
+          TMP=$(mktemp -d)
+
+          echo "Downloading City Kit (Suburban)..."
+          curl -sL -o "$TMP/suburban.zip" "https://kenney.nl/media/pages/assets/city-kit-suburban/167f6dbc31-1745479373/kenney_city-kit-suburban_20.zip"
+          unzip -o -q "$TMP/suburban.zip" -d "$TMP/suburban"
+          find "$TMP/suburban" -name "*.glb" -exec cp {} assets/models/buildings/residential/ \;
+
+          echo "Downloading City Kit (Commercial)..."
+          curl -sL -o "$TMP/commercial.zip" "https://kenney.nl/media/pages/assets/city-kit-commercial/16eb35d771-1753115042/kenney_city-kit-commercial_2.1.zip"
+          unzip -o -q "$TMP/commercial.zip" -d "$TMP/commercial"
+          find "$TMP/commercial" -name "*.glb" -exec cp {} assets/models/buildings/commercial/ \;
+
+          echo "Downloading City Kit (Industrial)..."
+          curl -sL -o "$TMP/industrial.zip" "https://kenney.nl/media/pages/assets/city-kit-industrial/1c9d714428-1750838303/kenney_city-kit-industrial_1.0.zip"
+          unzip -o -q "$TMP/industrial.zip" -d "$TMP/industrial"
+          find "$TMP/industrial" -name "*.glb" -exec cp {} assets/models/buildings/industrial/ \;
+
+          echo "Models: $(find assets/models/buildings -name '*.glb' | wc -l) GLB files"
+          rm -rf "$TMP"
+
+      - name: Package binary + assets
         shell: bash
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/slidecity${{ matrix.ext }} dist/${{ matrix.artifact }}${{ matrix.ext }}
-          # Include asset directories (empty — game works without assets)
+          # Bundle all assets (textures + downloaded models)
           cp -r assets dist/assets 2>/dev/null || true
           cp .env.example dist/.env.example 2>/dev/null || true
 
