@@ -128,6 +128,32 @@ struct TreeMarker {
 #[derive(Resource)]
 struct TreeLodTimer(Timer);
 
+/// Audio handles loaded at startup.
+#[allow(dead_code)]
+#[derive(Resource)]
+struct GameAudio {
+    ambient_birds: Handle<AudioSource>,
+    ambient_city: Handle<AudioSource>,
+    ambient_wind: Handle<AudioSource>,
+    sfx_place_zone: Handle<AudioSource>,
+    sfx_place_road: Handle<AudioSource>,
+    sfx_demolish: Handle<AudioSource>,
+    sfx_cash_register: Handle<AudioSource>,
+    sfx_fire_alarm: Handle<AudioSource>,
+    sfx_power_on: Handle<AudioSource>,
+    ambient_started: bool,
+}
+
+/// Tracks what the sim built last tick for SFX triggers.
+#[derive(Resource, Default)]
+struct SimEvents {
+    new_buildings: u32,
+    new_roads: u32,
+    new_fires: u32,
+    new_power: u32,
+    demolished: u32,
+}
+
 // ===== SYSTEM SETS =====
 
 /// Execution order for game systems to prevent one-frame-lag visual artifacts.
@@ -372,6 +398,7 @@ fn main() {
             spawn_trees.in_set(GameSet::Render),
             update_road_mesh.in_set(GameSet::Render),
             tree_lod_update,
+            audio_system.in_set(GameSet::Render),
         ))
         .run();
 }
@@ -646,6 +673,22 @@ fn setup(
         handle: road_mesh_handle,
         entity: road_entity,
     });
+
+    // Audio — load all sound files (Bevy handles missing files gracefully)
+    commands.insert_resource(GameAudio {
+        ambient_birds: asset_server.load("audio/ambient/birds.ogg"),
+        ambient_city: asset_server.load("audio/ambient/city.ogg"),
+        ambient_wind: asset_server.load("audio/ambient/wind.ogg"),
+        sfx_place_zone: asset_server.load("audio/sfx/place_zone.ogg"),
+        sfx_place_road: asset_server.load("audio/sfx/place_road.ogg"),
+        sfx_demolish: asset_server.load("audio/sfx/demolish.ogg"),
+        sfx_cash_register: asset_server.load("audio/sfx/cash_register.ogg"),
+        sfx_fire_alarm: asset_server.load("audio/sfx/fire_alarm.ogg"),
+        sfx_power_on: asset_server.load("audio/sfx/power_on.ogg"),
+        ambient_started: false,
+    });
+    commands.insert_resource(SimEvents::default());
+    eprintln!("[SlideCity] Audio system initialized");
 }
 
 // ===== ORBIT CAMERA =====
@@ -989,8 +1032,10 @@ fn update_terrain_mesh(
 fn compute_dirty_cells(
     grid_res: Res<GameGrid>,
     mut prev_state: ResMut<PreviousCellState>,
+    mut sim_events: ResMut<SimEvents>,
 ) {
     prev_state.dirty.clear();
+    *sim_events = SimEvents::default();
 
     if !grid_res.is_changed() {
         return;
@@ -1003,8 +1048,31 @@ fn compute_dirty_cells(
             let cell = &grid.cells[idx];
             let new_state = (cell.tile, age_stage(cell.age), cell.style);
             if prev_state.cells[idx] != new_state {
+                let old_tile = prev_state.cells[idx].0;
                 prev_state.dirty.insert((col, row));
                 prev_state.cells[idx] = new_state;
+
+                // Track sim events for audio
+                match cell.tile {
+                    TileType::Residential | TileType::Commercial | TileType::Industrial
+                        if old_tile == TileType::Empty => {
+                        sim_events.new_buildings += 1;
+                    }
+                    TileType::Road if old_tile == TileType::Empty => {
+                        sim_events.new_roads += 1;
+                    }
+                    TileType::Fire => {
+                        sim_events.new_fires += 1;
+                    }
+                    TileType::PowerPlant | TileType::PowerLine
+                        if old_tile == TileType::Empty => {
+                        sim_events.new_power += 1;
+                    }
+                    TileType::Rubble => {
+                        sim_events.demolished += 1;
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1111,16 +1179,17 @@ fn update_buildings(
 
         // Try GLTF model first — pick from the right pool based on tile type
         if model_pool.models_ready {
-            // Rubble/Fire use a small residential model (abandoned look)
-            let (models, scale_override) = match cell.tile {
-                TileType::Rubble | TileType::Fire => (&model_pool.residential, Some(0.25)),
-                TileType::Residential => (&model_pool.residential, None),
+            // Rubble/Fire keep a building model visible (abandoned look — sunken + smaller)
+            let (models, scale_override, y_offset) = match cell.tile {
+                TileType::Rubble => (&model_pool.residential, Some(0.30), -0.05),
+                TileType::Fire => (&model_pool.residential, Some(0.30), 0.0),
+                TileType::Residential => (&model_pool.residential, None, 0.0),
                 TileType::Commercial if stage >= 2 && !model_pool.commercial_large.is_empty() => {
-                    (&model_pool.commercial_large, None)
+                    (&model_pool.commercial_large, None, 0.0)
                 }
-                TileType::Commercial => (&model_pool.commercial, None),
-                TileType::Industrial => (&model_pool.industrial, None),
-                _ => (&model_pool.residential, None), // infrastructure fallback
+                TileType::Commercial => (&model_pool.commercial, None, 0.0),
+                TileType::Industrial => (&model_pool.industrial, None, 0.0),
+                _ => (&model_pool.residential, None, 0.0), // infrastructure fallback
             };
 
             if !models.is_empty() {
@@ -1133,7 +1202,7 @@ fn update_buildings(
                 });
                 commands.spawn((
                     SceneRoot(scene_handle.clone()),
-                    Transform::from_xyz(world_x, base_y, world_z)
+                    Transform::from_xyz(world_x, base_y + y_offset, world_z)
                         .with_scale(Vec3::splat(model_scale)),
                     BuildingMarker { col, row },
                 ));
@@ -1577,5 +1646,103 @@ fn update_road_mesh(
         if let Some(idx) = new_mesh.indices() {
             mesh.insert_indices(idx.clone());
         }
+    }
+}
+
+// ===== AUDIO =====
+
+/// Start ambient sounds once, and play SFX in response to sim events.
+fn audio_system(
+    mut commands: Commands,
+    mut audio_res: ResMut<GameAudio>,
+    sim_events: Res<SimEvents>,
+    game: Res<GameState>,
+) {
+    // Start ambient loops once (on first frame after setup)
+    if !audio_res.ambient_started {
+        audio_res.ambient_started = true;
+
+        // Wind — always playing, quiet
+        commands.spawn((
+            AudioPlayer(audio_res.ambient_wind.clone()),
+            PlaybackSettings {
+                mode: bevy::audio::PlaybackMode::Loop,
+                volume: bevy::audio::Volume::new(0.15),
+                ..default()
+            },
+        ));
+
+        // Birds — nature ambiance
+        commands.spawn((
+            AudioPlayer(audio_res.ambient_birds.clone()),
+            PlaybackSettings {
+                mode: bevy::audio::PlaybackMode::Loop,
+                volume: bevy::audio::Volume::new(0.1),
+                ..default()
+            },
+        ));
+
+        eprintln!("[SlideCity] Ambient audio started");
+    }
+
+    // SFX triggers based on sim events this tick
+    if sim_events.new_buildings > 0 {
+        commands.spawn((
+            AudioPlayer(audio_res.sfx_place_zone.clone()),
+            PlaybackSettings {
+                mode: bevy::audio::PlaybackMode::Despawn,
+                volume: bevy::audio::Volume::new(0.4),
+                ..default()
+            },
+        ));
+    }
+
+    if sim_events.new_roads > 0 {
+        commands.spawn((
+            AudioPlayer(audio_res.sfx_place_road.clone()),
+            PlaybackSettings {
+                mode: bevy::audio::PlaybackMode::Despawn,
+                volume: bevy::audio::Volume::new(0.4),
+                ..default()
+            },
+        ));
+    }
+
+    if sim_events.new_fires > 0 {
+        commands.spawn((
+            AudioPlayer(audio_res.sfx_fire_alarm.clone()),
+            PlaybackSettings {
+                mode: bevy::audio::PlaybackMode::Despawn,
+                volume: bevy::audio::Volume::new(0.5),
+                ..default()
+            },
+        ));
+    }
+
+    if sim_events.new_power > 0 {
+        commands.spawn((
+            AudioPlayer(audio_res.sfx_power_on.clone()),
+            PlaybackSettings {
+                mode: bevy::audio::PlaybackMode::Despawn,
+                volume: bevy::audio::Volume::new(0.3),
+                ..default()
+            },
+        ));
+    }
+
+    if sim_events.demolished > 0 {
+        commands.spawn((
+            AudioPlayer(audio_res.sfx_demolish.clone()),
+            PlaybackSettings {
+                mode: bevy::audio::PlaybackMode::Despawn,
+                volume: bevy::audio::Volume::new(0.4),
+                ..default()
+            },
+        ));
+    }
+
+    // Start city hum once population grows (check every few ticks)
+    if game.stats.population > 50 {
+        // City ambient will be started via a future population milestone system
     }
 }
