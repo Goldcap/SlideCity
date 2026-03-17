@@ -782,9 +782,15 @@ fn build_terrain_mesh(grid: &Grid, use_atlas: bool) -> Mesh {
 }
 
 /// Average height at a grid corner (shared by up to 4 cells).
+/// If any adjacent cell is a road, flatten the corner to match the road's smoothed height
+/// so terrain seamlessly meets the road surface (SC4-style contouring).
 fn corner_height(grid: &Grid, col: usize, row: usize, scale: f32) -> f32 {
     let mut sum = 0.0;
     let mut count = 0.0;
+    let mut has_road = false;
+    let mut road_height_sum = 0.0;
+    let mut road_count = 0.0;
+
     // Sample up to 4 adjacent cells
     for dr in [0usize.wrapping_sub(1), 0] {
         for dc in [0usize.wrapping_sub(1), 0] {
@@ -794,6 +800,13 @@ fn corner_height(grid: &Grid, col: usize, row: usize, scale: f32) -> f32 {
                 let cell = grid.get(c, r);
                 if cell.tile == TileType::WaterBody {
                     sum += 0.0;
+                } else if cell.tile == TileType::Road {
+                    // Road cell: use smoothed road height for flattening
+                    has_road = true;
+                    let rh = smoothed_road_height(grid, c, r);
+                    road_height_sum += rh;
+                    road_count += 1.0;
+                    sum += rh;
                 } else {
                     sum += cell.terrain_height * scale;
                 }
@@ -801,7 +814,22 @@ fn corner_height(grid: &Grid, col: usize, row: usize, scale: f32) -> f32 {
             }
         }
     }
-    if count > 0.0 { sum / count } else { 0.0 }
+
+    if has_road {
+        // Flatten: blend terrain toward road height for smooth contouring
+        let road_avg = road_height_sum / road_count;
+        let terrain_avg = if count > road_count {
+            (sum - road_height_sum) / (count - road_count)
+        } else {
+            road_avg
+        };
+        // Blend heavily toward road height (80% road, 20% terrain)
+        road_avg * 0.8 + terrain_avg * 0.2
+    } else if count > 0.0 {
+        sum / count
+    } else {
+        0.0
+    }
 }
 
 fn terrain_color(cell: &grid::Cell) -> (f32, f32, f32) {
@@ -1244,6 +1272,33 @@ fn tree_lod_update(
 
 // ===== ROAD NETWORK MESH =====
 
+/// Road surface offset above terrain to prevent z-fighting.
+const ROAD_Y_OFFSET: f32 = 0.02;
+
+/// Compute smoothed road height: average this road cell's height with connected
+/// road neighbors. This prevents "steps" between adjacent road cells on uneven terrain.
+fn smoothed_road_height(grid: &Grid, col: usize, row: usize) -> f32 {
+    let cell = grid.get(col, row);
+    let mut sum = cell.terrain_height;
+    let mut count = 1.0;
+
+    // Average with cardinal road neighbors
+    let neighbors: [(isize, isize); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+    for (dc, dr) in neighbors {
+        let nc = col as isize + dc;
+        let nr = row as isize + dr;
+        if nc >= 0 && nc < grid.width as isize && nr >= 0 && nr < grid.height as isize {
+            let n = grid.get(nc as usize, nr as usize);
+            if n.tile == TileType::Road {
+                sum += n.terrain_height;
+                count += 1.0;
+            }
+        }
+    }
+
+    (sum / count) * HEIGHT_SCALE + ROAD_Y_OFFSET
+}
+
 /// Compute a 4-bit bitmask for a road cell based on cardinal road neighbors.
 /// N=8, E=4, S=2, W=1
 fn road_neighbor_mask(grid: &Grid, col: usize, row: usize) -> u8 {
@@ -1263,138 +1318,101 @@ fn road_neighbor_mask(grid: &Grid, col: usize, row: usize) -> u8 {
     mask
 }
 
-/// Road surface width relative to TILE_SIZE (narrower than full cell).
-const ROAD_WIDTH: f32 = 0.7;
-const ROAD_HALF: f32 = ROAD_WIDTH / 2.0;
-const ROAD_Y_OFFSET: f32 = 0.05; // Above terrain to avoid z-fighting
-
-/// Generate road mesh geometry for a single cell based on its neighbor mask.
-/// Appends vertices and indices to the provided buffers.
-#[allow(clippy::too_many_arguments)]
+/// Generate road mesh geometry for a single cell.
+/// Uses a full-cell-width quad with neighbor-matched edge heights for seamless connections.
 fn emit_road_cell(
     grid: &Grid,
     col: usize,
     row: usize,
-    mask: u8,
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
-    let cx = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
-    let cz = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
-    let cell = grid.get(col, row);
-    let y = cell.terrain_height * HEIGHT_SCALE + ROAD_Y_OFFSET;
+    let x0 = col as f32 * TILE_SIZE;
+    let z0 = row as f32 * TILE_SIZE;
+    let x1 = x0 + TILE_SIZE;
+    let z1 = z0 + TILE_SIZE;
+
+    // Use smoothed height for this cell
+    let y = smoothed_road_height(grid, col, row);
+
+    // Match corner heights to neighbors for seamless edges:
+    // Each corner averages the smoothed heights of the up-to-4 road cells that share it.
+    let y_tl = road_corner_height(grid, col, row, 0, 0); // top-left
+    let y_tr = road_corner_height(grid, col, row, 1, 0); // top-right
+    let y_bl = road_corner_height(grid, col, row, 0, 1); // bottom-left
+    let y_br = road_corner_height(grid, col, row, 1, 1); // bottom-right
 
     let up = [0.0f32, 1.0, 0.0];
+    let road_color = [0.30, 0.30, 0.32, 1.0]; // Uniform asphalt
 
-    // Road colors: center is darker asphalt, edges slightly lighter
-    let road_color = [0.28, 0.28, 0.30, 1.0];
-    let marking_color = [0.75, 0.72, 0.55, 1.0]; // Yellow center line
-
-    // Always emit a center square (the intersection/base of the road)
+    // Full-cell road quad
     let base_idx = positions.len() as u32;
-    positions.push([cx - ROAD_HALF, y, cz - ROAD_HALF]);
-    positions.push([cx + ROAD_HALF, y, cz - ROAD_HALF]);
-    positions.push([cx - ROAD_HALF, y, cz + ROAD_HALF]);
-    positions.push([cx + ROAD_HALF, y, cz + ROAD_HALF]);
+    positions.push([x0, y_tl, z0]); // TL
+    positions.push([x1, y_tr, z0]); // TR
+    positions.push([x0, y_bl, z1]); // BL
+    positions.push([x1, y_br, z1]); // BR
     for _ in 0..4 { normals.push(up); colors.push(road_color); }
     indices.extend_from_slice(&[base_idx, base_idx+2, base_idx+1, base_idx+1, base_idx+2, base_idx+3]);
 
-    // Extend road arms to cell edges based on neighbor mask
-    // North arm (towards -Z)
-    if mask & 8 != 0 {
-        let idx = positions.len() as u32;
-        let z_edge = row as f32 * TILE_SIZE;
-        positions.push([cx - ROAD_HALF, y, z_edge]);
-        positions.push([cx + ROAD_HALF, y, z_edge]);
-        positions.push([cx - ROAD_HALF, y, cz - ROAD_HALF]);
-        positions.push([cx + ROAD_HALF, y, cz - ROAD_HALF]);
-        for _ in 0..4 { normals.push(up); colors.push(road_color); }
-        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+    // Center line markings (yellow dashed)
+    let cx = x0 + TILE_SIZE / 2.0;
+    let cz = z0 + TILE_SIZE / 2.0;
+    let mask = road_neighbor_mask(grid, col, row);
+    let marking_color = [0.75, 0.72, 0.55, 1.0];
+    let lw = 0.025; // line width
+    let my = y + 0.002; // slightly above road surface
 
-        // Center line marking
-        emit_center_line(positions, normals, colors, indices,
-            cx, y + 0.001, z_edge, cz - ROAD_HALF, true, marking_color);
+    // Vertical center line (N-S roads)
+    if mask & 0b1010 != 0 { // has N or S neighbor
+        let idx = positions.len() as u32;
+        positions.push([cx - lw, my, z0]);
+        positions.push([cx + lw, my, z0]);
+        positions.push([cx - lw, my, z1]);
+        positions.push([cx + lw, my, z1]);
+        for _ in 0..4 { normals.push(up); colors.push(marking_color); }
+        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
     }
 
-    // East arm (towards +X)
-    if mask & 4 != 0 {
+    // Horizontal center line (E-W roads)
+    if mask & 0b0101 != 0 { // has E or W neighbor
         let idx = positions.len() as u32;
-        let x_edge = (col + 1) as f32 * TILE_SIZE;
-        positions.push([cx + ROAD_HALF, y, cz - ROAD_HALF]);
-        positions.push([x_edge, y, cz - ROAD_HALF]);
-        positions.push([cx + ROAD_HALF, y, cz + ROAD_HALF]);
-        positions.push([x_edge, y, cz + ROAD_HALF]);
-        for _ in 0..4 { normals.push(up); colors.push(road_color); }
+        positions.push([x0, my, cz - lw]);
+        positions.push([x1, my, cz - lw]);
+        positions.push([x0, my, cz + lw]);
+        positions.push([x1, my, cz + lw]);
+        for _ in 0..4 { normals.push(up); colors.push(marking_color); }
         indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
-
-        emit_center_line(positions, normals, colors, indices,
-            cx + ROAD_HALF, y + 0.001, cz, cz, false, marking_color);
-    }
-
-    // South arm (towards +Z)
-    if mask & 2 != 0 {
-        let idx = positions.len() as u32;
-        let z_edge = (row + 1) as f32 * TILE_SIZE;
-        positions.push([cx - ROAD_HALF, y, cz + ROAD_HALF]);
-        positions.push([cx + ROAD_HALF, y, cz + ROAD_HALF]);
-        positions.push([cx - ROAD_HALF, y, z_edge]);
-        positions.push([cx + ROAD_HALF, y, z_edge]);
-        for _ in 0..4 { normals.push(up); colors.push(road_color); }
-        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
-
-        emit_center_line(positions, normals, colors, indices,
-            cx, y + 0.001, cz + ROAD_HALF, z_edge, true, marking_color);
-    }
-
-    // West arm (towards -X)
-    if mask & 1 != 0 {
-        let idx = positions.len() as u32;
-        let x_edge = col as f32 * TILE_SIZE;
-        positions.push([x_edge, y, cz - ROAD_HALF]);
-        positions.push([cx - ROAD_HALF, y, cz - ROAD_HALF]);
-        positions.push([x_edge, y, cz + ROAD_HALF]);
-        positions.push([cx - ROAD_HALF, y, cz + ROAD_HALF]);
-        for _ in 0..4 { normals.push(up); colors.push(road_color); }
-        indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
-
-        emit_center_line(positions, normals, colors, indices,
-            x_edge, y + 0.001, cz, cz, false, marking_color);
     }
 }
 
-/// Emit a thin center line marking quad.
-#[allow(clippy::too_many_arguments)]
-fn emit_center_line(
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-    x: f32, y: f32, z_start: f32, z_end: f32,
-    vertical: bool,  // true = N/S (along Z), false = E/W (along X)
-    color: [f32; 4],
-) {
-    let idx = positions.len() as u32;
-    let up = [0.0f32, 1.0, 0.0];
-    let line_width = 0.03;
+/// Compute road corner height by averaging smoothed heights of road cells sharing this corner.
+/// corner_dx/corner_dy: 0=left/top, 1=right/bottom
+fn road_corner_height(grid: &Grid, col: usize, row: usize, corner_dx: usize, corner_dy: usize) -> f32 {
+    let mut sum = 0.0;
+    let mut count = 0.0;
 
-    if vertical {
-        positions.push([x - line_width, y, z_start]);
-        positions.push([x + line_width, y, z_start]);
-        positions.push([x - line_width, y, z_end]);
-        positions.push([x + line_width, y, z_end]);
-    } else {
-        // Horizontal: x varies, z is center
-        let cx = x;
-        let x_end = cx + ROAD_HALF;
-        positions.push([cx, y, z_start - line_width]);
-        positions.push([x_end, y, z_start - line_width]);
-        positions.push([cx, y, z_start + line_width]);
-        positions.push([x_end, y, z_start + line_width]);
+    // The 4 cells that share this corner
+    for dr in [0usize.wrapping_sub(1), 0] {
+        for dc in [0usize.wrapping_sub(1), 0] {
+            let c = (col + corner_dx).wrapping_add(dc);
+            let r = (row + corner_dy).wrapping_add(dr);
+            if c < grid.width && r < grid.height {
+                let cell = grid.get(c, r);
+                if cell.tile == TileType::Road {
+                    sum += smoothed_road_height(grid, c, r);
+                    count += 1.0;
+                } else {
+                    // Non-road neighbors: use the base terrain height so road
+                    // edges blend with terrain
+                    sum += cell.terrain_height * HEIGHT_SCALE + ROAD_Y_OFFSET;
+                    count += 1.0;
+                }
+            }
+        }
     }
-    for _ in 0..4 { normals.push(up); colors.push(color); }
-    indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
+    if count > 0.0 { sum / count } else { smoothed_road_height(grid, col, row) }
 }
 
 /// Full rebuild of the road network mesh from grid state.
@@ -1409,8 +1427,7 @@ fn build_road_mesh(grid: &Grid) -> Mesh {
             if grid.get(col, row).tile != TileType::Road {
                 continue;
             }
-            let mask = road_neighbor_mask(grid, col, row);
-            emit_road_cell(grid, col, row, mask, &mut positions, &mut normals, &mut colors, &mut indices);
+            emit_road_cell(grid, col, row, &mut positions, &mut normals, &mut colors, &mut indices);
         }
     }
 
