@@ -102,12 +102,30 @@ struct BuildingModelPool {
     models_ready: bool,
 }
 
-/// Road network mesh entity + reusable buffers.
+/// Road model handles for each configuration type.
+#[derive(Resource)]
+struct RoadModelPool {
+    straight: Handle<Scene>,
+    bend: Handle<Scene>,
+    crossroad: Handle<Scene>,
+    intersection: Handle<Scene>, // T-junction
+    dead_end: Handle<Scene>,
+    roundabout: Handle<Scene>,
+    has_models: bool,
+}
+
+/// Fallback: procedural road mesh (used when no GLTF road models available).
 #[allow(dead_code)]
 #[derive(Resource)]
 struct RoadMeshRes {
     handle: Handle<Mesh>,
     entity: Entity,
+}
+
+#[derive(Component)]
+struct RoadMarker {
+    col: usize,
+    row: usize,
 }
 
 /// Pre-loaded tree scene handles. Uses Kenney GLTF models when available,
@@ -400,7 +418,7 @@ fn main() {
             check_models_loaded.in_set(GameSet::Render),
             update_buildings.in_set(GameSet::Render).after(check_models_loaded),
             spawn_trees.in_set(GameSet::Render),
-            update_road_mesh.in_set(GameSet::Render),
+            spawn_road_models.in_set(GameSet::Render),
             tree_lod_update,
             audio_system.in_set(GameSet::Render),
         ))
@@ -674,6 +692,28 @@ fn setup(
         use_gltf: use_gltf_trees,
     });
     commands.insert_resource(TreeLodTimer(Timer::from_seconds(0.5, TimerMode::Repeating)));
+
+    // Road models from Kenney City Kit (Roads)
+    let road_dir = Path::new("assets/models/roads");
+    let has_road_models = road_dir.join("road-straight.glb").exists();
+    if has_road_models {
+        eprintln!("[SlideCity] Road models found — using Kenney road pieces");
+    } else {
+        eprintln!("[SlideCity] No road models — using procedural road mesh fallback");
+    }
+    let load_road = |name: &str| -> Handle<Scene> {
+        let path = format!("models/roads/{name}#Scene0");
+        asset_server.load(&path)
+    };
+    commands.insert_resource(RoadModelPool {
+        straight: load_road("road-straight.glb"),
+        bend: load_road("road-bend.glb"),
+        crossroad: load_road("road-crossroad.glb"),
+        intersection: load_road("road-intersection.glb"),
+        dead_end: load_road("road-end.glb"),
+        roundabout: load_road("road-roundabout.glb"),
+        has_models: has_road_models,
+    });
 
     // Road network mesh (starts empty, rebuilt when roads are placed)
     let road_mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
@@ -1478,19 +1518,16 @@ fn tree_lod_update(
     }
 }
 
-// ===== ROAD NETWORK MESH =====
+// ===== ROAD MODELS (Kenney City Kit Roads) =====
 
-/// Road surface offset above terrain to prevent z-fighting.
+/// Road surface offset above terrain.
 const ROAD_Y_OFFSET: f32 = 0.02;
 
-/// Compute smoothed road height: average this road cell's height with connected
-/// road neighbors. This prevents "steps" between adjacent road cells on uneven terrain.
+/// Compute smoothed road height for terrain flattening.
 fn smoothed_road_height(grid: &Grid, col: usize, row: usize) -> f32 {
     let cell = grid.get(col, row);
     let mut sum = cell.terrain_height;
     let mut count = 1.0;
-
-    // Average with cardinal road neighbors
     let neighbors: [(isize, isize); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
     for (dc, dr) in neighbors {
         let nc = col as isize + dc;
@@ -1503,203 +1540,131 @@ fn smoothed_road_height(grid: &Grid, col: usize, row: usize) -> f32 {
             }
         }
     }
-
     (sum / count) * HEIGHT_SCALE + ROAD_Y_OFFSET
 }
 
-/// Compute a 4-bit bitmask for a road cell based on cardinal road neighbors.
-/// N=8, E=4, S=2, W=1
+/// 4-bit bitmask: N=8, E=4, S=2, W=1
 fn road_neighbor_mask(grid: &Grid, col: usize, row: usize) -> u8 {
     let mut mask = 0u8;
-    if row > 0 && grid.get(col, row - 1).tile == TileType::Road {
-        mask |= 8; // North
-    }
-    if col + 1 < grid.width && grid.get(col + 1, row).tile == TileType::Road {
-        mask |= 4; // East
-    }
-    if row + 1 < grid.height && grid.get(col, row + 1).tile == TileType::Road {
-        mask |= 2; // South
-    }
-    if col > 0 && grid.get(col - 1, row).tile == TileType::Road {
-        mask |= 1; // West
-    }
+    if row > 0 && grid.get(col, row - 1).tile == TileType::Road { mask |= 8; }
+    if col + 1 < grid.width && grid.get(col + 1, row).tile == TileType::Road { mask |= 4; }
+    if row + 1 < grid.height && grid.get(col, row + 1).tile == TileType::Road { mask |= 2; }
+    if col > 0 && grid.get(col - 1, row).tile == TileType::Road { mask |= 1; }
     mask
 }
 
-/// Road half-width (narrower than full cell for SC4-style appearance).
-const ROAD_HALF_W: f32 = 0.35;
+/// Select the road model and Y-axis rotation for a given neighbor bitmask.
+/// Returns (scene_handle, rotation_in_radians).
+fn road_model_for_mask(mask: u8, pool: &RoadModelPool) -> (Handle<Scene>, f32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    match mask {
+        // Isolated (no neighbors)
+        0b0000 => (pool.roundabout.clone(), 0.0),
 
-/// Emit a quad helper.
-fn emit_quad(
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-    corners: [[f32; 3]; 4],
-    color: [f32; 4],
-) {
-    let idx = positions.len() as u32;
-    let up = [0.0f32, 1.0, 0.0];
-    for c in &corners { positions.push(*c); }
-    for _ in 0..4 { normals.push(up); colors.push(color); }
-    indices.extend_from_slice(&[idx, idx+2, idx+1, idx+1, idx+2, idx+3]);
-}
+        // Dead-ends (1 neighbor)
+        0b1000 => (pool.dead_end.clone(), 0.0),      // N
+        0b0100 => (pool.dead_end.clone(), -FRAC_PI_2), // E
+        0b0010 => (pool.dead_end.clone(), PI),         // S
+        0b0001 => (pool.dead_end.clone(), FRAC_PI_2),  // W
 
-/// Generate road mesh for a cell: narrow strips forming a cross/plus shape.
-/// Center intersection square + arms extending to cell edges toward road neighbors.
-fn emit_road_cell(
-    grid: &Grid,
-    col: usize,
-    row: usize,
-    positions: &mut Vec<[f32; 3]>,
-    normals: &mut Vec<[f32; 3]>,
-    colors: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-) {
-    let cx = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
-    let cz = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
-    let y = smoothed_road_height(grid, col, row);
-    let mask = road_neighbor_mask(grid, col, row);
+        // Straight (2 opposite neighbors)
+        0b1010 => (pool.straight.clone(), 0.0),        // N+S
+        0b0101 => (pool.straight.clone(), FRAC_PI_2),  // E+W
 
-    // Use white vertex color — the material base_color provides the gray
-    let road_col = [1.0, 1.0, 1.0, 1.0];
-    let line_col = [2.5, 2.4, 1.8, 1.0]; // Bright yellow (will be multiplied by material gray)
+        // Bends (2 adjacent neighbors)
+        0b1100 => (pool.bend.clone(), 0.0),            // N+E
+        0b0110 => (pool.bend.clone(), -FRAC_PI_2),     // E+S
+        0b0011 => (pool.bend.clone(), PI),              // S+W
+        0b1001 => (pool.bend.clone(), FRAC_PI_2),      // W+N
 
-    // Center intersection square (always present)
-    emit_quad(positions, normals, colors, indices, [
-        [cx - ROAD_HALF_W, y, cz - ROAD_HALF_W],
-        [cx + ROAD_HALF_W, y, cz - ROAD_HALF_W],
-        [cx - ROAD_HALF_W, y, cz + ROAD_HALF_W],
-        [cx + ROAD_HALF_W, y, cz + ROAD_HALF_W],
-    ], road_col);
+        // T-junctions (3 neighbors)
+        0b1110 => (pool.intersection.clone(), 0.0),     // N+E+S (missing W)
+        0b0111 => (pool.intersection.clone(), -FRAC_PI_2), // E+S+W (missing N)
+        0b1011 => (pool.intersection.clone(), PI),       // S+W+N (missing E)
+        0b1101 => (pool.intersection.clone(), FRAC_PI_2), // W+N+E (missing S)
 
-    // Arms extending to cell edges toward connected neighbors
-    let x0 = col as f32 * TILE_SIZE;
-    let z0 = row as f32 * TILE_SIZE;
-    let x1 = x0 + TILE_SIZE;
-    let z1 = z0 + TILE_SIZE;
-    let lw = 0.03; // center line width
-    let ly = y + 0.003; // line sits just above road
+        // 4-way crossroad
+        0b1111 => (pool.crossroad.clone(), 0.0),
 
-    // North arm
-    if mask & 8 != 0 {
-        emit_quad(positions, normals, colors, indices, [
-            [cx - ROAD_HALF_W, y, z0],
-            [cx + ROAD_HALF_W, y, z0],
-            [cx - ROAD_HALF_W, y, cz - ROAD_HALF_W],
-            [cx + ROAD_HALF_W, y, cz - ROAD_HALF_W],
-        ], road_col);
-        // Center line
-        emit_quad(positions, normals, colors, indices, [
-            [cx - lw, ly, z0], [cx + lw, ly, z0],
-            [cx - lw, ly, cz - ROAD_HALF_W], [cx + lw, ly, cz - ROAD_HALF_W],
-        ], line_col);
-    }
-
-    // South arm
-    if mask & 2 != 0 {
-        emit_quad(positions, normals, colors, indices, [
-            [cx - ROAD_HALF_W, y, cz + ROAD_HALF_W],
-            [cx + ROAD_HALF_W, y, cz + ROAD_HALF_W],
-            [cx - ROAD_HALF_W, y, z1],
-            [cx + ROAD_HALF_W, y, z1],
-        ], road_col);
-        emit_quad(positions, normals, colors, indices, [
-            [cx - lw, ly, cz + ROAD_HALF_W], [cx + lw, ly, cz + ROAD_HALF_W],
-            [cx - lw, ly, z1], [cx + lw, ly, z1],
-        ], line_col);
-    }
-
-    // East arm
-    if mask & 4 != 0 {
-        emit_quad(positions, normals, colors, indices, [
-            [cx + ROAD_HALF_W, y, cz - ROAD_HALF_W],
-            [x1, y, cz - ROAD_HALF_W],
-            [cx + ROAD_HALF_W, y, cz + ROAD_HALF_W],
-            [x1, y, cz + ROAD_HALF_W],
-        ], road_col);
-        emit_quad(positions, normals, colors, indices, [
-            [cx + ROAD_HALF_W, ly, cz - lw], [x1, ly, cz - lw],
-            [cx + ROAD_HALF_W, ly, cz + lw], [x1, ly, cz + lw],
-        ], line_col);
-    }
-
-    // West arm
-    if mask & 1 != 0 {
-        emit_quad(positions, normals, colors, indices, [
-            [x0, y, cz - ROAD_HALF_W],
-            [cx - ROAD_HALF_W, y, cz - ROAD_HALF_W],
-            [x0, y, cz + ROAD_HALF_W],
-            [cx - ROAD_HALF_W, y, cz + ROAD_HALF_W],
-        ], road_col);
-        emit_quad(positions, normals, colors, indices, [
-            [x0, ly, cz - lw], [cx - ROAD_HALF_W, ly, cz - lw],
-            [x0, ly, cz + lw], [cx - ROAD_HALF_W, ly, cz + lw],
-        ], line_col);
+        _ => (pool.straight.clone(), 0.0),
     }
 }
 
-
-
-/// Full rebuild of the road network mesh from grid state.
-fn build_road_mesh(grid: &Grid) -> Mesh {
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-
-    for row in 0..grid.height {
-        for col in 0..grid.width {
-            if grid.get(col, row).tile != TileType::Road {
-                continue;
-            }
-            emit_road_cell(grid, col, row, &mut positions, &mut normals, &mut colors, &mut indices);
-        }
-    }
-
-    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, colors)
-        .with_inserted_indices(Indices::U32(indices))
-}
-
-/// Update the road mesh when road cells change.
-fn update_road_mesh(
+/// Spawn road model entities for each road cell. Incremental via dirty cells.
+fn spawn_road_models(
+    mut commands: Commands,
     grid_res: Res<GameGrid>,
     prev_state: Res<PreviousCellState>,
-    road_res: Res<RoadMeshRes>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    road_pool: Res<RoadModelPool>,
+    existing: Query<(Entity, &RoadMarker)>,
+    mut initial_spawn_done: Local<bool>,
 ) {
-    // Only rebuild if any dirty cell involves a road
-    if prev_state.dirty.is_empty() {
+    if !road_pool.has_models {
+        return;
+    }
+
+    let full_spawn = !*initial_spawn_done;
+    if !full_spawn && prev_state.dirty.is_empty() {
         return;
     }
 
     let grid = &grid_res.grid;
 
-    // Conservative: rebuild road mesh on any dirty cell change.
-    // Road neighbors affect adjacent cells' mesh pieces, so any tile change
-    // near a road could affect the road mesh.
+    if full_spawn {
+        *initial_spawn_done = true;
+        for row in 0..grid.height {
+            for col in 0..grid.width {
+                spawn_road_for_cell(&mut commands, grid, col, row, &road_pool);
+            }
+        }
+    } else {
+        // Despawn road models on dirty cells and their neighbors (mask changes affect neighbors)
+        let mut cells_to_rebuild: HashSet<(usize, usize)> = HashSet::new();
+        for &(col, row) in &prev_state.dirty {
+            cells_to_rebuild.insert((col, row));
+            // Also rebuild cardinal neighbors (their mask may have changed)
+            if row > 0 { cells_to_rebuild.insert((col, row - 1)); }
+            if col + 1 < grid.width { cells_to_rebuild.insert((col + 1, row)); }
+            if row + 1 < grid.height { cells_to_rebuild.insert((col, row + 1)); }
+            if col > 0 { cells_to_rebuild.insert((col - 1, row)); }
+        }
 
-    // Full rebuild of road mesh
-    let new_mesh = build_road_mesh(grid);
+        for (entity, marker) in &existing {
+            if cells_to_rebuild.contains(&(marker.col, marker.row)) {
+                commands.entity(entity).despawn();
+            }
+        }
 
-    if let Some(mesh) = meshes.get_mut(&road_res.handle) {
-        // Copy attributes from new mesh
-        if let Some(pos) = new_mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
-            mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone());
-        }
-        if let Some(norm) = new_mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
-            mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, norm.clone());
-        }
-        if let Some(col) = new_mesh.attribute(Mesh::ATTRIBUTE_COLOR) {
-            mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, col.clone());
-        }
-        if let Some(idx) = new_mesh.indices() {
-            mesh.insert_indices(idx.clone());
+        for &(col, row) in &cells_to_rebuild {
+            spawn_road_for_cell(&mut commands, grid, col, row, &road_pool);
         }
     }
+}
+
+fn spawn_road_for_cell(
+    commands: &mut Commands,
+    grid: &Grid,
+    col: usize,
+    row: usize,
+    road_pool: &RoadModelPool,
+) {
+    let cell = grid.get(col, row);
+    if cell.tile != TileType::Road {
+        return;
+    }
+
+    let mask = road_neighbor_mask(grid, col, row);
+    let (scene, rotation) = road_model_for_mask(mask, road_pool);
+    let y = smoothed_road_height(grid, col, row);
+    let x = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+    let z = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
+
+    commands.spawn((
+        SceneRoot(scene),
+        Transform::from_xyz(x, y, z)
+            .with_rotation(Quat::from_rotation_y(rotation)),
+        RoadMarker { col, row },
+    ));
 }
 
 // ===== AUDIO =====

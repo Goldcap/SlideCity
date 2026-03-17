@@ -98,6 +98,16 @@ jobs:
           print('Created abandoned colormap textures')
           " || echo "PIL not available — skipping abandoned texture"
 
+          # Download Kenney City Kit (Roads)
+          echo "Downloading City Kit (Roads)..."
+          curl -sL -o "$TMP/roads.zip" "https://kenney.nl/media/pages/assets/city-kit-roads/4b84d0ea8d-1741864740/kenney_city-kit-roads.zip"
+          unzip -o -q "$TMP/roads.zip" -d "$TMP/roads"
+          mkdir -p assets/models/roads/Textures
+          for f in road-straight.glb road-bend.glb road-crossroad.glb road-intersection.glb road-end.glb road-roundabout.glb road-crossing.glb; do
+            find "$TMP/roads" -path "*/GLB format/$f" -exec cp {} assets/models/roads/ \; 2>/dev/null || true
+          done
+          find "$TMP/roads" -path "*/GLB format/Textures/*" -exec cp {} assets/models/roads/Textures/ \;
+
           # Copy tree models from suburban pack to dedicated trees directory
           mkdir -p assets/models/trees/Textures
           cp assets/models/buildings/residential/tree-large.glb assets/models/trees/

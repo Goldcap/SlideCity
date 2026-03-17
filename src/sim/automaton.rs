@@ -92,77 +92,62 @@ fn rule_empty(grid: &Grid, col: usize, row: usize, _config: &SimConfig, rng: &mu
     None
 }
 
-/// Residential: can decay from pollution, abandonment, or upzone to commercial.
+/// Residential: grows and evolves. Abandonment is EXTREMELY rare (SC4 pacing).
+/// Buildings should persist for a long time. Only catastrophic conditions cause decay.
 fn rule_residential(
     grid: &Grid, col: usize, row: usize, cell: &Cell,
-    config: &SimConfig, rng: &mut SmallRng,
+    _config: &SimConfig, rng: &mut SmallRng,
 ) -> Option<TileType> {
     let ind_nearby = grid.count_neighbors(col, row, 3, TileType::Industrial);
     let park_nearby = grid.count_neighbors(col, row, 3, TileType::Park);
     let com_nearby = grid.count_neighbors(col, row, 3, TileType::Commercial);
-    let decay = config.decay_multiplier;
 
-    // Pollution decay (very rare — need heavy industrial AND no parks)
-    if ind_nearby >= 5 && park_nearby == 0 && rng.gen::<f32>() < 0.004 * decay {
-        return Some(TileType::Rubble);
-    }
-
-    // Power abandonment (slow — give mayor time to build power)
-    if !cell.has_power && cell.age > 80 && rng.gen::<f32>() < 0.002 * decay {
-        return Some(TileType::Rubble);
-    }
-
-    // Water abandonment (very slow)
-    if !cell.has_water && cell.age > 100 && rng.gen::<f32>() < 0.001 * decay {
-        return Some(TileType::Rubble);
-    }
-
-    // Upzone to commercial
+    // Upzone to commercial (positive evolution — this is good!)
     if cell.age > 50 && com_nearby >= 3 && cell.has_power && cell.has_water && rng.gen::<f32>() < 0.008 {
         return Some(TileType::Commercial);
     }
 
+    // Pollution decay: ONLY if surrounded by heavy industry with zero parks
+    // This should be a very rare catastrophic event
+    if ind_nearby >= 6 && park_nearby == 0 && cell.age > 150 && rng.gen::<f32>() < 0.0005 {
+        return Some(TileType::Rubble);
+    }
+
+    // Power/water: buildings survive fine without utilities for a very long time.
+    // Only ancient buildings with NO power AND NO water will eventually abandon.
+    if !cell.has_power && !cell.has_water && cell.age > 200 && rng.gen::<f32>() < 0.0003 {
+        return Some(TileType::Rubble);
+    }
+
     None
 }
 
-/// Commercial: decays without customers or power.
+/// Commercial: grows with customers. Very resilient — only abandons in extreme isolation.
 fn rule_commercial(
     grid: &Grid, col: usize, row: usize, cell: &Cell,
-    config: &SimConfig, rng: &mut SmallRng,
+    _config: &SimConfig, rng: &mut SmallRng,
 ) -> Option<TileType> {
     let res_nearby = grid.count_neighbors(col, row, 4, TileType::Residential);
-    let decay = config.decay_multiplier;
 
-    // No customers (slower — give time for residential to grow nearby)
-    if res_nearby < 2 && cell.age > 50 && rng.gen::<f32>() < 0.004 * decay {
-        return Some(TileType::Rubble);
-    }
-
-    // No power
-    if !cell.has_power && cell.age > 60 && rng.gen::<f32>() < 0.003 * decay {
+    // Complete isolation: no residential anywhere nearby for a very long time
+    if res_nearby == 0 && cell.age > 200 && rng.gen::<f32>() < 0.0005 {
         return Some(TileType::Rubble);
     }
 
     None
 }
 
-/// Industrial: can gentrify to commercial or decay without power.
+/// Industrial: can gentrify to commercial. Very resilient.
 fn rule_industrial(
     grid: &Grid, col: usize, row: usize, cell: &Cell,
-    config: &SimConfig, rng: &mut SmallRng,
+    _config: &SimConfig, rng: &mut SmallRng,
 ) -> Option<TileType> {
     let res_nearby = grid.count_neighbors(col, row, 4, TileType::Residential);
     let com_nearby = grid.count_neighbors(col, row, 3, TileType::Commercial);
-    let decay = config.decay_multiplier;
 
-    // Gentrification
+    // Gentrification — positive evolution
     if res_nearby >= 6 && com_nearby >= 3 && cell.age > 35 && rng.gen::<f32>() < 0.008 {
         return Some(TileType::Commercial);
-    }
-
-    // No power (industrial is more tolerant)
-    if !cell.has_power && cell.age > 60 && rng.gen::<f32>() < 0.003 * decay {
-        return Some(TileType::Rubble);
     }
 
     None
