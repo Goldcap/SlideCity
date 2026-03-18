@@ -7,10 +7,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub enum TileType {
     Empty,
+    ZonedResidential,  // Zoned but no building yet (SC4-style)
+    ZonedCommercial,
+    ZonedIndustrial,
     Road,
-    Residential,
+    Residential,       // Has building
     Commercial,
     Industrial,
+    Abandoned,         // Former building, demand-driven abandonment
     Park,
     PowerPlant,
     PowerLine,
@@ -18,7 +22,7 @@ pub enum TileType {
     WaterMain,
     Monument,
     Fire,
-    Rubble,
+    Rubble,            // Fire damage (distinct from economic Abandoned)
     WaterBody,
 }
 
@@ -27,10 +31,14 @@ impl TileType {
     pub fn label(self) -> &'static str {
         match self {
             TileType::Empty => "",
+            TileType::ZonedResidential => "zR",
+            TileType::ZonedCommercial => "zC",
+            TileType::ZonedIndustrial => "zI",
             TileType::Road => "R",
             TileType::Residential => "H",
             TileType::Commercial => "C",
             TileType::Industrial => "I",
+            TileType::Abandoned => "A",
             TileType::Park => "P",
             TileType::PowerPlant => "E",
             TileType::PowerLine => "e",
@@ -46,20 +54,24 @@ impl TileType {
     /// Fallback color for colored-rect rendering (R, G, B).
     pub fn color(self) -> (f32, f32, f32) {
         match self {
-            TileType::Empty => (0.3, 0.5, 0.2),        // grass green
-            TileType::Road => (0.35, 0.35, 0.35),       // asphalt grey
-            TileType::Residential => (0.2, 0.6, 0.2),   // green
-            TileType::Commercial => (0.2, 0.3, 0.8),    // blue
-            TileType::Industrial => (0.7, 0.6, 0.2),    // yellow-brown
-            TileType::Park => (0.1, 0.7, 0.3),          // bright green
-            TileType::PowerPlant => (0.8, 0.5, 0.1),    // orange
-            TileType::PowerLine => (0.7, 0.5, 0.1),     // light orange
-            TileType::WaterTower => (0.1, 0.4, 0.9),    // bright blue
-            TileType::WaterMain => (0.2, 0.4, 0.7),     // medium blue
-            TileType::Monument => (0.7, 0.3, 0.8),      // purple
-            TileType::Fire => (0.9, 0.2, 0.0),          // red-orange
-            TileType::Rubble => (0.4, 0.35, 0.3),       // dark brown
-            TileType::WaterBody => (0.1, 0.3, 0.7),     // deep blue
+            TileType::Empty => (0.3, 0.5, 0.2),              // grass green
+            TileType::ZonedResidential => (0.4, 0.65, 0.35),  // light green (zoned)
+            TileType::ZonedCommercial => (0.35, 0.45, 0.7),   // light blue (zoned)
+            TileType::ZonedIndustrial => (0.65, 0.6, 0.35),   // light yellow (zoned)
+            TileType::Road => (0.35, 0.35, 0.35),             // asphalt grey
+            TileType::Residential => (0.2, 0.6, 0.2),         // green
+            TileType::Commercial => (0.2, 0.3, 0.8),          // blue
+            TileType::Industrial => (0.7, 0.6, 0.2),          // yellow-brown
+            TileType::Abandoned => (0.35, 0.28, 0.2),         // dark brown (abandoned)
+            TileType::Park => (0.1, 0.7, 0.3),                // bright green
+            TileType::PowerPlant => (0.8, 0.5, 0.1),          // orange
+            TileType::PowerLine => (0.7, 0.5, 0.1),           // light orange
+            TileType::WaterTower => (0.1, 0.4, 0.9),          // bright blue
+            TileType::WaterMain => (0.2, 0.4, 0.7),           // medium blue
+            TileType::Monument => (0.7, 0.3, 0.8),            // purple
+            TileType::Fire => (0.9, 0.2, 0.0),                // red-orange
+            TileType::Rubble => (0.4, 0.35, 0.3),             // dark brown
+            TileType::WaterBody => (0.1, 0.3, 0.7),           // deep blue
         }
     }
 
@@ -74,7 +86,10 @@ impl TileType {
             3
         };
         match self {
-            TileType::Empty | TileType::Road | TileType::Park | TileType::WaterBody => 0.0,
+            TileType::Empty | TileType::ZonedResidential | TileType::ZonedCommercial
+            | TileType::ZonedIndustrial | TileType::Road | TileType::Park
+            | TileType::WaterBody => 0.0,
+            TileType::Abandoned => 1.0, // Abandoned building stays visible
             TileType::Residential => match stage {
                 1 => 1.0,
                 2 => 2.0,
@@ -100,18 +115,43 @@ impl TileType {
         }
     }
 
-    /// Population per cell based on stage.
-    pub fn population(self, age: u8) -> u32 {
+    /// Population per cell based on building stage.
+    pub fn population(self, building_stage: u8) -> u32 {
         if self != TileType::Residential {
             return 0;
         }
-        if age < 16 {
-            2
-        } else if age < 46 {
-            6
-        } else {
-            12
+        match building_stage {
+            0 => 4,
+            1 => 10,
+            _ => 20,
         }
+    }
+
+    /// Jobs provided per cell based on building stage.
+    pub fn jobs(self, building_stage: u8) -> u32 {
+        match self {
+            TileType::Commercial => match building_stage {
+                0 => 3,
+                1 => 8,
+                _ => 15,
+            },
+            TileType::Industrial => match building_stage {
+                0 => 6,
+                1 => 15,
+                _ => 30,
+            },
+            _ => 0,
+        }
+    }
+
+    /// Whether this tile type is a zoned-but-empty cell.
+    pub fn is_zoned_empty(self) -> bool {
+        matches!(self, TileType::ZonedResidential | TileType::ZonedCommercial | TileType::ZonedIndustrial)
+    }
+
+    /// Whether this tile is a developed building (R/C/I with actual structure).
+    pub fn is_building(self) -> bool {
+        matches!(self, TileType::Residential | TileType::Commercial | TileType::Industrial)
     }
 }
 
@@ -168,6 +208,12 @@ pub struct Cell {
     pub has_water: bool,
     pub terrain_height: f32,
     pub terrain_type: TerrainType,
+    /// Building development stage (0-2 for Phase 1). Higher = larger building.
+    #[serde(default)]
+    pub building_stage: u8,
+    /// Ticks of sustained negative conditions. At 20+, building abandons.
+    #[serde(default)]
+    pub abandon_timer: u8,
 }
 
 impl Cell {
@@ -180,6 +226,8 @@ impl Cell {
             has_water: false,
             terrain_height,
             terrain_type: TerrainType::Grass,
+            building_stage: 0,
+            abandon_timer: 0,
         }
     }
 
@@ -192,6 +240,8 @@ impl Cell {
             has_water: false,
             terrain_height,
             terrain_type: TerrainType::Grass,
+            building_stage: 0,
+            abandon_timer: 0,
         }
     }
 }
@@ -241,6 +291,20 @@ impl Grid {
 
     /// Calculate total population.
     pub fn population(&self) -> u32 {
-        self.cells.iter().map(|c| c.tile.population(c.age)).sum()
+        self.cells.iter().map(|c| c.tile.population(c.building_stage)).sum()
+    }
+
+    /// Calculate total jobs (commercial + industrial).
+    pub fn total_jobs(&self) -> (u32, u32) {
+        let mut c_jobs = 0u32;
+        let mut i_jobs = 0u32;
+        for cell in &self.cells {
+            match cell.tile {
+                TileType::Commercial => c_jobs += cell.tile.jobs(cell.building_stage),
+                TileType::Industrial => i_jobs += cell.tile.jobs(cell.building_stage),
+                _ => {}
+            }
+        }
+        (c_jobs, i_jobs)
     }
 }

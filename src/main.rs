@@ -15,6 +15,8 @@ use config::SimConfig;
 use grid::terrain::generate_terrain;
 use grid::{Grid, TileType, TerrainType};
 use mayor::Mayor;
+use sim::demand::RciDemand;
+use sim::desirability::DesirabilityGrid;
 use sim::stats::CityStats;
 use ::rand::rngs::SmallRng;
 use ::rand::SeedableRng;
@@ -53,7 +55,7 @@ struct TerrainAtlas {
 /// Shared across terrain, building, and road update systems.
 #[derive(Resource)]
 struct PreviousCellState {
-    /// (tile, age_stage, style) per cell — only these affect visual output
+    /// (tile, building_stage, style) per cell — only these affect visual output
     cells: Vec<(TileType, u8, u8)>,
     /// Cells that changed this tick — consumed by rendering systems
     dirty: HashSet<(usize, usize)>,
@@ -62,16 +64,19 @@ struct PreviousCellState {
 impl PreviousCellState {
     fn from_grid(grid: &Grid) -> Self {
         let cells = grid.cells.iter().map(|c| {
-            (c.tile, age_stage(c.age), c.style)
+            (c.tile, c.building_stage, c.style)
         }).collect();
         Self { cells, dirty: HashSet::new() }
     }
 }
 
-/// Map age to visual stage: 0-15 -> 0, 16-45 -> 1, 46+ -> 2
-fn age_stage(age: u8) -> u8 {
-    if age < 16 { 0 } else if age < 46 { 1 } else { 2 }
-}
+
+/// Bevy resource wrappers for RCI demand and desirability.
+#[derive(Resource)]
+struct RciDemandRes(RciDemand);
+
+#[derive(Resource)]
+struct DesirabilityGridRes(DesirabilityGrid);
 
 /// Material handle for abandoned buildings (brown-tinted colormap).
 #[derive(Resource)]
@@ -212,14 +217,15 @@ fn terrain_atlas_index(terrain: TerrainType) -> (u32, u32) {
 /// Returns the (col, row) position in the atlas for a zone tile type (row 5).
 fn zone_atlas_index(tile: TileType) -> Option<(u32, u32)> {
     let col = match tile {
-        TileType::Residential => 0,
-        TileType::Commercial => 1,
-        TileType::Industrial => 2,
+        TileType::Residential | TileType::ZonedResidential => 0,
+        TileType::Commercial | TileType::ZonedCommercial => 1,
+        TileType::Industrial | TileType::ZonedIndustrial => 2,
         TileType::Park => 3,
         TileType::PowerPlant => 4,
         TileType::WaterTower => 5,
         TileType::Monument => 6,
         TileType::Road => 7,
+        TileType::Abandoned => return Some((5, 5)), // Use dirt/brown atlas tile
         _ => return None,
     };
     Some((col, 5))
@@ -628,6 +634,12 @@ fn setup(
     };
     commands.insert_resource(AbandonedMaterial(abandoned_mat));
 
+    // RCI demand and desirability systems
+    let mut desir = DesirabilityGrid::new(config.grid_width, config.grid_height);
+    desir.recompute(&grid);
+    commands.insert_resource(RciDemandRes(RciDemand::default()));
+    commands.insert_resource(DesirabilityGridRes(desir));
+
     // Store resources
     let prev_state = PreviousCellState::from_grid(&grid);
     commands.insert_resource(GameGrid { grid, next_grid });
@@ -998,6 +1010,8 @@ fn simulation_tick(
     keys: Res<ButtonInput<KeyCode>>,
     mut game: ResMut<GameState>,
     mut grid_res: ResMut<GameGrid>,
+    mut rci_demand: ResMut<RciDemandRes>,
+    mut desir_grid: ResMut<DesirabilityGridRes>,
 ) {
     // Speed control
     if keys.just_pressed(KeyCode::Digit1) { game.speed_idx = 0; }
@@ -1019,7 +1033,12 @@ fn simulation_tick(
         *tick_timer -= tick_duration;
         *tick_count += 1;
 
-        sim::tick(grid, next_grid, config, rng, funds);
+        // Update demand and desirability before tick (drives growth/decay)
+        let raw_demand = RciDemand::compute_raw(grid);
+        rci_demand.0.smooth(&raw_demand);
+        desir_grid.0.recompute(grid);
+
+        sim::tick(grid, next_grid, config, rng, funds, &rci_demand.0, &desir_grid.0);
 
         if tick_count.is_multiple_of(config.utility_recompute_interval) {
             sim::utilities::recompute_utilities(grid);
@@ -1028,7 +1047,7 @@ fn simulation_tick(
         if tick_count.is_multiple_of(config.mayor_tick_interval) {
             let tc = *tick_count;
             let s = stats.clone();
-            mayor.decide(grid, &s, config, funds, tc, rng);
+            mayor.decide(grid, &s, config, funds, tc, rng, &rci_demand.0);
         }
 
         *stats = CityStats::compute(grid);
@@ -1109,7 +1128,7 @@ fn compute_dirty_cells(
         for col in 0..grid.width {
             let idx = row * grid.width + col;
             let cell = &grid.cells[idx];
-            let new_state = (cell.tile, age_stage(cell.age), cell.style);
+            let new_state = (cell.tile, cell.building_stage, cell.style);
             if prev_state.cells[idx] != new_state {
                 let old_tile = prev_state.cells[idx].0;
                 prev_state.dirty.insert((col, row));
@@ -1235,7 +1254,7 @@ fn update_buildings(
             continue;
         }
 
-        let stage = age_stage(cell.age);
+        let stage = cell.building_stage;
         let building_h = height * 0.4;
         let base_y = cell.terrain_height * HEIGHT_SCALE;
         let world_x = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;

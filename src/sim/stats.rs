@@ -34,7 +34,7 @@ impl CityStats {
                 match cell.tile {
                     TileType::Residential => {
                         stats.res_count += 1;
-                        stats.population += cell.tile.population(cell.age);
+                        stats.population += cell.tile.population(cell.building_stage);
                         stats.total_zones += 1;
                         if cell.has_power {
                             stats.powered_zones += 1;

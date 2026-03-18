@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::SimConfig;
 use crate::grid::{Grid, TileType};
+use crate::sim::demand::RciDemand;
 use crate::sim::growth;
 use crate::sim::stats::CityStats;
 use narration::{season_name, MayorLog, NarrationContext};
@@ -66,6 +67,7 @@ impl Mayor {
         funds: &mut i64,
         tick_count: u64,
         rng: &mut SmallRng,
+        demand: &RciDemand,
     ) {
         let year = (tick_count / config.ticks_per_year as u64) as u32 + 1;
         let season = season_name(tick_count, config.ticks_per_season);
@@ -101,9 +103,9 @@ impl Mayor {
         // Phase-specific behavior
         match self.phase {
             MayorPhase::Founding => self.founding_tick(grid, stats, config, funds, year, season, rng),
-            MayorPhase::Growth => self.growth_tick(grid, stats, config, funds, year, season, rng),
-            MayorPhase::Maturity => self.maturity_tick(grid, stats, config, funds, year, season, rng),
-            MayorPhase::Evolution => self.evolution_tick(grid, stats, config, funds, year, season, rng),
+            MayorPhase::Growth => self.growth_tick(grid, stats, config, funds, year, season, rng, demand),
+            MayorPhase::Maturity => self.maturity_tick(grid, stats, config, funds, year, season, rng, demand),
+            MayorPhase::Evolution => self.evolution_tick(grid, stats, config, funds, year, season, rng, demand),
         }
     }
 
@@ -229,13 +231,14 @@ impl Mayor {
     fn growth_tick(
         &mut self, grid: &mut Grid, stats: &CityStats, _config: &SimConfig,
         funds: &mut i64, year: u32, season: &'static str, rng: &mut SmallRng,
+        demand: &RciDemand,
     ) {
         let p = self.personality();
         let emoji = p.emoji;
 
         // Check growth rate modifier
         if rng.gen::<f32>() > p.growth_rate_modifier() {
-            return; // Skip this tick (slow growth/expansion weakness)
+            return;
         }
 
         // Fund check
@@ -244,7 +247,7 @@ impl Mayor {
             return;
         }
 
-        // CRITICAL: utility coverage
+        // CRITICAL: utility coverage first
         if stats.power_coverage < 0.50 {
             self.extend_utility(grid, funds, true, year, season, rng);
             return;
@@ -254,62 +257,52 @@ impl Mayor {
             return;
         }
 
-        // HIGH: residential demand
-        let target_res = (20.0 + stats.population as f32 * 0.3 * p.growth_aggression) as u32;
-        if stats.res_count < target_res && *funds > 10000 {
-            if let Some((col, row)) = find_empty_near_road(grid, rng) {
-                let size = rng.gen_range(8..=20);
-                let placed = growth::grow_blob(grid, col, row, TileType::Residential, size, rng);
-                if placed > 0 {
-                    *funds -= p.modify_cost(200, false, false, false);
-                    self.log.push(year, season, emoji, narration::narrate(NarrationContext::ResidentialPlaced, rng).to_string());
-                    self.pan_to_grid(col, row);
-                }
-            }
+        // BULLDOZE: abandoned buildings spread blight — clean them up
+        if self.bulldoze_abandoned(grid, funds, year, season, rng) {
             return;
         }
 
-        // HIGH: commercial demand
-        let r_to_c = if stats.com_count > 0 {
-            stats.res_count as f32 / stats.com_count as f32
-        } else {
-            999.0
-        };
-        if r_to_c > 5.0 && *funds > 10000 {
-            if let Some((col, row)) = find_empty_near_road(grid, rng) {
-                let size = rng.gen_range(4..=12);
-                let placed = growth::grow_blob(grid, col, row, TileType::Commercial, size, rng);
-                if placed > 0 {
-                    *funds -= p.modify_cost(500, false, false, false);
-                    self.log.push(year, season, emoji, narration::narrate(NarrationContext::CommercialPlaced, rng).to_string());
-                    self.pan_to_grid(col, row);
+        // DEMAND-DRIVEN ZONING: zone the type with highest demand
+        // Mayor now ZONES land (ZonedR/C/I) — buildings develop organically via automaton
+        if let Some(zone_type) = demand.highest_demand() {
+            if *funds > 5000 {
+                if let Some((col, row)) = find_empty_near_road(grid, rng) {
+                    let size = match zone_type {
+                        TileType::ZonedResidential => rng.gen_range(6..=16),
+                        TileType::ZonedCommercial => rng.gen_range(3..=10),
+                        TileType::ZonedIndustrial => rng.gen_range(8..=20),
+                        _ => 8,
+                    };
+                    let placed = growth::grow_blob(grid, col, row, zone_type, size, rng);
+                    if placed > 0 {
+                        let cost = match zone_type {
+                            TileType::ZonedResidential => p.modify_cost(100, false, false, false),
+                            TileType::ZonedCommercial => p.modify_cost(200, false, false, false),
+                            TileType::ZonedIndustrial => p.modify_cost(150, false, false, false),
+                            _ => 100,
+                        };
+                        *funds -= cost;
+                        let context = match zone_type {
+                            TileType::ZonedResidential => NarrationContext::ResidentialPlaced,
+                            TileType::ZonedCommercial => NarrationContext::CommercialPlaced,
+                            TileType::ZonedIndustrial => NarrationContext::IndustrialPlaced,
+                            _ => NarrationContext::ResidentialPlaced,
+                        };
+                        self.log.push(year, season, emoji, narration::narrate(context, rng).to_string());
+                        self.pan_to_grid(col, row);
+                    }
                 }
+                return;
             }
-            return;
         }
 
-        // HIGH: industrial (based on personality)
-        if p.industrial_bias > 0.4 && stats.ind_count < stats.res_count / 4 && *funds > 10000 {
-            if let Some((col, row)) = find_empty_near_road(grid, rng) {
-                let size = rng.gen_range(10..=24);
-                let placed = growth::grow_blob(grid, col, row, TileType::Industrial, size, rng);
-                if placed > 0 {
-                    *funds -= p.modify_cost(800, false, false, false);
-                    self.log.push(year, season, emoji, narration::narrate(NarrationContext::IndustrialPlaced, rng).to_string());
-                    self.pan_to_grid(col, row);
-                }
-            }
-            return;
-        }
-
-        // MEDIUM: happiness - park
+        // PARKS: for happiness boost
         if stats.happiness < 0.65 && p.green_affinity > 0.3 {
             if let Some((col, row)) = find_empty_near_development(grid, rng) {
                 let size = rng.gen_range(4..=10);
                 let placed = growth::grow_blob(grid, col, row, TileType::Park, size, rng);
                 if placed > 0 {
-                    let cost = p.modify_cost(300, false, true, false);
-                    *funds -= cost;
+                    *funds -= p.modify_cost(300, false, true, false);
                     self.log.push(year, season, emoji, narration::narrate(NarrationContext::ParkPlaced, rng).to_string());
                     self.pan_to_grid(col, row);
                 }
@@ -317,10 +310,36 @@ impl Mayor {
             return;
         }
 
-        // MEDIUM: extend road network
+        // ROADS: extend network
         if *funds > 20000 && rng.gen::<f32>() < 0.3 {
             self.extend_roads(grid, funds, year, season, rng);
         }
+    }
+
+    /// Bulldoze abandoned buildings — returns true if an action was taken.
+    fn bulldoze_abandoned(
+        &mut self, grid: &mut Grid, funds: &mut i64,
+        year: u32, season: &'static str, _rng: &mut SmallRng,
+    ) -> bool {
+        // Find first abandoned building
+        for row in 0..grid.height {
+            for col in 0..grid.width {
+                if grid.get(col, row).tile == TileType::Abandoned {
+                    let cell = grid.get_mut(col, row);
+                    cell.tile = TileType::Empty;
+                    cell.age = 0;
+                    cell.building_stage = 0;
+                    cell.abandon_timer = 0;
+                    *funds -= 50; // Bulldoze cost
+                    let p = self.personality();
+                    self.log.push(year, season, p.emoji,
+                        "Bulldozed an abandoned building.".to_string());
+                    self.pan_to_grid(col, row);
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     // ===== MATURITY PHASE =====
@@ -328,6 +347,7 @@ impl Mayor {
     fn maturity_tick(
         &mut self, grid: &mut Grid, stats: &CityStats, config: &SimConfig,
         funds: &mut i64, year: u32, season: &'static str, rng: &mut SmallRng,
+        demand: &RciDemand,
     ) {
         let p = self.personality();
         let emoji = p.emoji;
@@ -373,7 +393,7 @@ impl Mayor {
 
         // Continue growth at reduced pace
         if rng.gen::<f32>() < 0.5 {
-            self.growth_tick(grid, stats, config, funds, year, season, rng);
+            self.growth_tick(grid, stats, config, funds, year, season, rng, demand);
         } else if rng.gen::<f32>() < 0.1 {
             // Occasional proud narration
             self.log.push(year, season, emoji, narration::narrate(NarrationContext::CityAlive, rng).to_string());
@@ -385,6 +405,7 @@ impl Mayor {
     fn evolution_tick(
         &mut self, grid: &mut Grid, stats: &CityStats, config: &SimConfig,
         funds: &mut i64, year: u32, season: &'static str, rng: &mut SmallRng,
+        demand: &RciDemand,
     ) {
         let p = self.personality();
         let emoji = p.emoji;
@@ -406,7 +427,7 @@ impl Mayor {
         }
 
         // Run maturity logic
-        self.maturity_tick(grid, stats, config, funds, year, season, rng);
+        self.maturity_tick(grid, stats, config, funds, year, season, rng, demand);
     }
 
     // ===== HELPER METHODS =====
