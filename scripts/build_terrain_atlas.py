@@ -29,12 +29,12 @@ TILE_SIZE = 128
 ATLAS_TILES = 16  # 16x16 grid
 ATLAS_SIZE = TILE_SIZE * ATLAS_TILES  # 2048
 
-# Base terrain colors (RGB tuples)
+# Base terrain colors (RGB tuples) — lighter for better zone contrast
 TERRAIN_COLORS = {
-    "grass":        (76, 140, 51),
-    "grass_flower": (89, 148, 64),
-    "trees":        (38, 107, 31),
-    "trees_sparse": (56, 122, 41),
+    "grass":        (120, 185, 90),
+    "grass_flower": (130, 190, 100),
+    "trees":        (60, 140, 50),
+    "trees_sparse": (80, 155, 65),
     "sand":         (194, 179, 128),
     "dirt":         (115, 97, 64),
     "rock":         (128, 122, 115),

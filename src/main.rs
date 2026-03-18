@@ -727,27 +727,8 @@ fn setup(
         has_models: has_road_models,
     });
 
-    // Road network mesh (starts empty, rebuilt when roads are placed)
-    let road_mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, Vec::<[f32; 3]>::new())
-        .with_inserted_attribute(Mesh::ATTRIBUTE_COLOR, Vec::<[f32; 4]>::new())
-        .with_inserted_indices(Indices::U32(Vec::new()));
-    let road_mesh_handle = meshes.add(road_mesh);
-    let road_entity = commands.spawn((
-        Mesh3d(road_mesh_handle.clone()),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.45, 0.45, 0.47),
-            perceptual_roughness: 0.95,
-            metallic: 0.0,
-            ..default()
-        })),
-        Transform::default(),
-    )).id();
-    commands.insert_resource(RoadMeshRes {
-        handle: road_mesh_handle,
-        entity: road_entity,
-    });
+    // Road models are spawned per-cell by spawn_road_models system
+    // (no legacy procedural mesh needed)
 
     // Audio — load all sound files (Bevy handles missing files gracefully)
     commands.insert_resource(GameAudio {
@@ -1134,10 +1115,11 @@ fn compute_dirty_cells(
                 prev_state.dirty.insert((col, row));
                 prev_state.cells[idx] = new_state;
 
-                // Track sim events for audio
+                // Track sim events for audio — only actual visible changes
                 match cell.tile {
+                    // Building developed from zoned land (the satisfying moment!)
                     TileType::Residential | TileType::Commercial | TileType::Industrial
-                        if old_tile == TileType::Empty => {
+                        if old_tile.is_zoned_empty() || old_tile == TileType::Empty => {
                         sim_events.new_buildings += 1;
                     }
                     TileType::Road if old_tile == TileType::Empty => {
@@ -1150,9 +1132,10 @@ fn compute_dirty_cells(
                         if old_tile == TileType::Empty => {
                         sim_events.new_power += 1;
                     }
-                    TileType::Rubble => {
+                    TileType::Abandoned => {
                         sim_events.demolished += 1;
                     }
+                    // Zoning events are silent — no SFX for zone placement
                     _ => {}
                 }
             }
@@ -1674,14 +1657,15 @@ fn spawn_road_for_cell(
 
     let mask = road_neighbor_mask(grid, col, row);
     let (scene, rotation) = road_model_for_mask(mask, road_pool);
-    let y = smoothed_road_height(grid, col, row);
+    let y = cell.terrain_height * HEIGHT_SCALE;
     let x = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
     let z = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
 
     commands.spawn((
         SceneRoot(scene),
         Transform::from_xyz(x, y, z)
-            .with_rotation(Quat::from_rotation_y(rotation)),
+            .with_rotation(Quat::from_rotation_y(rotation))
+            .with_scale(Vec3::new(TILE_SIZE, 1.0, TILE_SIZE)), // Match tile grid scale
         RoadMarker { col, row },
     ));
 }

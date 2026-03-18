@@ -219,6 +219,26 @@ impl Mayor {
                 }
                 self.log.push(year, season, emoji, narration::narrate(NarrationContext::WaterMainRun, rng).to_string());
             }
+            6 => {
+                // Zone commercial near the road intersection
+                let size = rng.gen_range(4..=8);
+                let placed = growth::grow_blob(grid, cx - 2, cy + 2, TileType::ZonedCommercial, size, rng);
+                if placed > 0 {
+                    *funds -= p.modify_cost(200, false, false, false);
+                    self.log.push(year, season, emoji, narration::narrate(NarrationContext::CommercialPlaced, rng).to_string());
+                    self.pan_to_grid(cx - 2, cy + 2);
+                }
+            }
+            7 => {
+                // Zone industrial away from residential
+                let size = rng.gen_range(6..=12);
+                let placed = growth::grow_blob(grid, cx + 2, cy - 4, TileType::ZonedIndustrial, size, rng);
+                if placed > 0 {
+                    *funds -= p.modify_cost(150, false, false, false);
+                    self.log.push(year, season, emoji, narration::narrate(NarrationContext::IndustrialPlaced, rng).to_string());
+                    self.pan_to_grid(cx + 2, cy - 4);
+                }
+            }
             _ => {
                 // Founding done, stay here until phase transition
             }

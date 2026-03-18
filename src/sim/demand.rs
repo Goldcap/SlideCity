@@ -9,8 +9,8 @@ pub struct RciDemand {
     pub industrial: f32,
 }
 
-/// EMA smoothing factor. Lower = smoother (less reactive).
-const DEMAND_ALPHA: f32 = 0.1;
+/// EMA smoothing factor. Higher = more reactive to changes.
+const DEMAND_ALPHA: f32 = 0.3;
 
 impl RciDemand {
     /// Compute raw demand from current grid state.
