@@ -29,12 +29,12 @@ TILE_SIZE = 128
 ATLAS_TILES = 16  # 16x16 grid
 ATLAS_SIZE = TILE_SIZE * ATLAS_TILES  # 2048
 
-# Base terrain colors (RGB) — matched to SimCity 4 palette
+# Base terrain colors (RGB) — bright and vivid, SC4-inspired
 TERRAIN_COLORS = {
-    "grass":        (95, 160, 65),
-    "grass_flower": (105, 168, 75),
-    "trees":        (50, 120, 38),
-    "trees_sparse": (70, 140, 50),
+    "grass":        (140, 200, 95),
+    "grass_flower": (150, 210, 110),
+    "trees":        (70, 155, 55),
+    "trees_sparse": (95, 175, 70),
     "sand":         (194, 179, 128),
     "dirt":         (115, 97, 64),
     "rock":         (128, 122, 115),
@@ -42,16 +42,16 @@ TERRAIN_COLORS = {
 }
 
 # Zone overlay colors
-# Zone overlay colors — SC4-inspired, distinct from terrain
+# Zone overlay colors — vivid, clearly distinct from terrain
 ZONE_COLORS = {
-    "residential":  (80, 170, 60),    # Bright green (SC4 light green zones)
-    "commercial":   (60, 90, 200),    # Blue
-    "industrial":   (190, 170, 60),   # Yellow
-    "park":         (40, 190, 80),    # Vivid green
-    "power_plant":  (160, 60, 50),    # Red-brown
-    "water_tower":  (50, 130, 190),   # Blue
-    "monument":     (180, 130, 50),   # Gold
-    "road":         (65, 65, 68),     # SC4 dark asphalt gray
+    "residential":  (110, 210, 80),   # Vivid bright green — MUST look green not blue!
+    "commercial":   (80, 120, 230),   # Clear blue
+    "industrial":   (220, 200, 70),   # Bright yellow
+    "park":         (60, 220, 100),   # Vivid emerald green
+    "power_plant":  (200, 80, 60),    # Red-brown
+    "water_tower":  (70, 150, 220),   # Sky blue
+    "monument":     (210, 160, 60),   # Gold
+    "road":         (75, 75, 78),     # Dark asphalt gray
 }
 
 # Terrain type order (matches Rust enum order and priority)
@@ -192,6 +192,30 @@ def make_seamless(img: Image.Image, margin: int = 16) -> Image.Image:
     return result
 
 
+def generate_road_tile(base_color: tuple) -> Image.Image:
+    """Generate a road tile with yellow center line cross pattern."""
+    # Start with a noisy asphalt base
+    tile = generate_textured_tile(base_color, "rock")  # rock style = gritty texture
+
+    draw = ImageDraw.Draw(tile)
+    cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
+    line_color = (240, 220, 80)  # Yellow center line
+    line_width = 2
+
+    # Vertical center line (full height)
+    draw.rectangle(
+        [cx - line_width, 0, cx + line_width, TILE_SIZE - 1],
+        fill=line_color,
+    )
+    # Horizontal center line (full width)
+    draw.rectangle(
+        [0, cy - line_width, TILE_SIZE - 1, cy + line_width],
+        fill=line_color,
+    )
+
+    return tile
+
+
 def generate_transition_tile(
     color_a: tuple, color_b: tuple, direction: str, style_a: str, style_b: str
 ) -> Image.Image:
@@ -295,7 +319,11 @@ def main():
     zone_row = 5
     print("Generating zone overlay tiles...")
     for i, name in enumerate(ZONE_ORDER):
-        tile = generate_textured_tile(ZONE_COLORS[name], "zone")
+        if name == "road":
+            # Special road tile with center lines (yellow cross pattern)
+            tile = generate_road_tile(ZONE_COLORS[name])
+        else:
+            tile = generate_textured_tile(ZONE_COLORS[name], "zone")
         atlas.paste(tile, (i * TILE_SIZE, zone_row * TILE_SIZE))
         print(f"  [{i}] {name}")
 

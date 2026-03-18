@@ -445,14 +445,14 @@ fn setup(
         materials.add(StandardMaterial {
             base_color: Color::WHITE,
             base_color_texture: Some(texture_handle),
-            perceptual_roughness: 0.9,
+            perceptual_roughness: 0.7,
             metallic: 0.0,
             ..default()
         })
     } else {
         materials.add(StandardMaterial {
             base_color: Color::WHITE,
-            perceptual_roughness: 0.9,
+            perceptual_roughness: 0.7,
             metallic: 0.0,
             ..default()
         })
@@ -498,7 +498,7 @@ fn setup(
     // Ambient light
     commands.insert_resource(AmbientLight {
         color: Color::srgb(0.9, 0.95, 1.0),
-        brightness: 300.0,
+        brightness: 600.0,
     });
 
     // Camera — orbit style, looking at center of map
