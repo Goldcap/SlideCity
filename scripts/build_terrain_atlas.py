@@ -193,23 +193,19 @@ def make_seamless(img: Image.Image, margin: int = 16) -> Image.Image:
 
 
 def generate_road_tile(base_color: tuple) -> Image.Image:
-    """Generate a road tile with yellow center line cross pattern."""
-    # Start with a noisy asphalt base
-    tile = generate_textured_tile(base_color, "rock")  # rock style = gritty texture
+    """Generate a road tile with a yellow dashed center line."""
+    tile = generate_textured_tile(base_color, "rock")  # gritty asphalt texture
 
     draw = ImageDraw.Draw(tile)
     cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
     line_color = (240, 220, 80)  # Yellow center line
-    line_width = 2
+    lw = 2  # line width
 
-    # Vertical center line (full height)
+    # Small yellow dash in the center — when tiled, creates a dashed pattern
+    dash_len = TILE_SIZE // 5
+    # Vertical dash
     draw.rectangle(
-        [cx - line_width, 0, cx + line_width, TILE_SIZE - 1],
-        fill=line_color,
-    )
-    # Horizontal center line (full width)
-    draw.rectangle(
-        [0, cy - line_width, TILE_SIZE - 1, cy + line_width],
+        [cx - lw, cy - dash_len, cx + lw, cy + dash_len],
         fill=line_color,
     )
 

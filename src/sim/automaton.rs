@@ -133,13 +133,15 @@ fn rule_building(
     }
 
     // Abandonment: sustained negative demand AND low desirability
-    if demand < -10.0 && desirability < 5.0 {
+    // Young buildings (age < 100) are protected — gives the mayor time to
+    // establish the demand loop (zone C/I for jobs) before buildings can abandon.
+    if cell.age > 100 && demand < -20.0 && desirability < 0.0 {
         cell.abandon_timer = cell.abandon_timer.saturating_add(1);
-        if cell.abandon_timer >= 20 {
+        if cell.abandon_timer >= 30 {
             return Some(TileType::Abandoned);
         }
     } else {
-        // Conditions improved — slowly reset timer
+        // Conditions improved or building is young — reset timer
         cell.abandon_timer = cell.abandon_timer.saturating_sub(1);
     }
 
