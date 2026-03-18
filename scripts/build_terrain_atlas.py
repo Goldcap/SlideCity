@@ -192,22 +192,23 @@ def make_seamless(img: Image.Image, margin: int = 16) -> Image.Image:
     return result
 
 
-def generate_road_tile(base_color: tuple) -> Image.Image:
-    """Generate a road tile with a yellow dashed center line."""
+def generate_road_tile(base_color: tuple, direction: str = "ns") -> Image.Image:
+    """Generate a road tile with a yellow center line in the given direction.
+    direction: 'ns' (vertical), 'ew' (horizontal), 'cross' (intersection)
+    """
     tile = generate_textured_tile(base_color, "rock")  # gritty asphalt texture
 
     draw = ImageDraw.Draw(tile)
     cx, cy = TILE_SIZE // 2, TILE_SIZE // 2
     line_color = (240, 220, 80)  # Yellow center line
-    lw = 2  # line width
+    lw = 2
 
-    # Small yellow dash in the center — when tiled, creates a dashed pattern
-    dash_len = TILE_SIZE // 5
-    # Vertical dash
-    draw.rectangle(
-        [cx - lw, cy - dash_len, cx + lw, cy + dash_len],
-        fill=line_color,
-    )
+    if direction in ("ns", "cross"):
+        # Vertical center line (full height for seamless tiling)
+        draw.rectangle([cx - lw, 0, cx + lw, TILE_SIZE - 1], fill=line_color)
+    if direction in ("ew", "cross"):
+        # Horizontal center line (full width for seamless tiling)
+        draw.rectangle([0, cy - lw, TILE_SIZE - 1, cy + lw], fill=line_color)
 
     return tile
 
@@ -316,12 +317,22 @@ def main():
     print("Generating zone overlay tiles...")
     for i, name in enumerate(ZONE_ORDER):
         if name == "road":
-            # Special road tile with center lines (yellow cross pattern)
-            tile = generate_road_tile(ZONE_COLORS[name])
+            # Road N-S (vertical center line) at col 7
+            tile = generate_road_tile(ZONE_COLORS[name], "ns")
         else:
             tile = generate_textured_tile(ZONE_COLORS[name], "zone")
         atlas.paste(tile, (i * TILE_SIZE, zone_row * TILE_SIZE))
         print(f"  [{i}] {name}")
+
+    # Extra road tiles: E-W at col 8, intersection at col 9
+    road_color = ZONE_COLORS["road"]
+    tile_ew = generate_road_tile(road_color, "ew")
+    atlas.paste(tile_ew, (8 * TILE_SIZE, zone_row * TILE_SIZE))
+    print("  [8] road-ew")
+
+    tile_cross = generate_road_tile(road_color, "cross")
+    atlas.paste(tile_cross, (9 * TILE_SIZE, zone_row * TILE_SIZE))
+    print("  [9] road-cross")
 
     # Save
     atlas.save(str(OUTPUT), "PNG", optimize=True)

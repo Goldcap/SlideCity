@@ -201,8 +201,8 @@ fn zone_atlas_index(tile: TileType) -> Option<(u32, u32)> {
         TileType::PowerPlant => 4,
         TileType::WaterTower => 5,
         TileType::Monument => 6,
-        TileType::Road => 7,
-        TileType::Abandoned => return Some((5, 5)), // Use dirt/brown atlas tile
+        // Road handled separately in cell_atlas_tile (direction-dependent)
+        TileType::Abandoned => return Some((5, 5)),
         _ => return None,
     };
     Some((col, 5))
@@ -261,12 +261,29 @@ fn cell_atlas_tile(grid: &Grid, col: usize, row: usize) -> (u32, u32) {
         return (0, 0); // Will be hidden by water plane anyway
     }
 
-    // Developed cells use zone overlay tiles
+    // Road cells: select tile based on neighbor direction
+    if cell.tile == TileType::Road {
+        // Check N-S and E-W connectivity
+        let has_ns = (row > 0 && grid.get(col, row - 1).tile == TileType::Road)
+            || (row + 1 < grid.height && grid.get(col, row + 1).tile == TileType::Road);
+        let has_ew = (col > 0 && grid.get(col - 1, row).tile == TileType::Road)
+            || (col + 1 < grid.width && grid.get(col + 1, row).tile == TileType::Road);
+
+        return if has_ns && has_ew {
+            (9, 5) // Cross/intersection
+        } else if has_ew {
+            (8, 5) // E-W road (horizontal line)
+        } else {
+            (7, 5) // N-S road (vertical line) — default for isolated roads too
+        };
+    }
+
+    // Other developed cells use zone overlay tiles
     if cell.tile != TileType::Empty {
         if let Some(idx) = zone_atlas_index(cell.tile) {
             return idx;
         }
-        // Fallback for tiles without a zone atlas entry (PowerLine, WaterMain, Fire, Rubble)
+        // Fallback for tiles without a zone atlas entry (PowerLine, WaterMain, Fire, Rubble, Road)
         return terrain_atlas_index(cell.terrain_type);
     }
 
