@@ -6,6 +6,7 @@ use ::rand::Rng;
 use crate::grid::{Grid, TileType};
 
 /// Grow a blob of tiles via BFS from a seed point.
+/// For zone tiles (ZonedR/C/I), cells must be within 2 cells of a road (SC4-style).
 /// Does not cross Road or WaterBody. Produces organic shapes via weighted random expansion.
 pub fn grow_blob(
     grid: &mut Grid,
@@ -24,6 +25,12 @@ pub fn grow_blob(
         return 0;
     }
 
+    // For zone tiles, seed must be near a road
+    let is_zone = tile.is_zoned_empty();
+    if is_zone && !near_road(grid, start_col, start_row, 2) {
+        return 0;
+    }
+
     let mut placed = 0;
     let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
     let mut visited = vec![false; grid.width * grid.height];
@@ -38,7 +45,6 @@ pub fn grow_blob(
     let idx = grid.idx(start_col, start_row);
     visited[idx] = true;
 
-    // Add neighbors to expansion queue
     add_neighbors(&mut queue, &mut visited, grid, start_col, start_row);
 
     // BFS expansion with randomized priority
@@ -47,7 +53,6 @@ pub fn grow_blob(
             break;
         }
 
-        // Pick a random candidate from the queue (organic shape)
         let pick_idx = rng.gen_range(0..queue.len());
         let (col, row) = queue[pick_idx];
         queue.swap_remove_back(pick_idx);
@@ -59,7 +64,11 @@ pub fn grow_blob(
             continue;
         }
 
-        // Place the tile
+        // Zone tiles must stay within 2 cells of a road (SC4 road frontage rule)
+        if is_zone && !near_road(grid, col, row, 2) {
+            continue;
+        }
+
         let cell = grid.get_mut(col, row);
         cell.tile = tile;
         cell.age = 0;
@@ -70,6 +79,26 @@ pub fn grow_blob(
     }
 
     placed
+}
+
+/// Check if a cell is within `max_dist` Manhattan distance of a Road tile.
+fn near_road(grid: &Grid, col: usize, row: usize, max_dist: usize) -> bool {
+    let d = max_dist as i32;
+    for dr in -d..=d {
+        for dc in -d..=d {
+            if dr.abs() + dc.abs() > d {
+                continue;
+            }
+            let nc = col as i32 + dc;
+            let nr = row as i32 + dr;
+            if nc >= 0 && nc < grid.width as i32 && nr >= 0 && nr < grid.height as i32 {
+                if grid.get(nc as usize, nr as usize).tile == TileType::Road {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn add_neighbors(
