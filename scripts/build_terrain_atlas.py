@@ -29,12 +29,12 @@ TILE_SIZE = 128
 ATLAS_TILES = 16  # 16x16 grid
 ATLAS_SIZE = TILE_SIZE * ATLAS_TILES  # 2048
 
-# Base terrain colors (RGB tuples) — lighter for better zone contrast
+# Base terrain colors (RGB) — matched to SimCity 4 palette
 TERRAIN_COLORS = {
-    "grass":        (120, 185, 90),
-    "grass_flower": (130, 190, 100),
-    "trees":        (60, 140, 50),
-    "trees_sparse": (80, 155, 65),
+    "grass":        (95, 160, 65),
+    "grass_flower": (105, 168, 75),
+    "trees":        (50, 120, 38),
+    "trees_sparse": (70, 140, 50),
     "sand":         (194, 179, 128),
     "dirt":         (115, 97, 64),
     "rock":         (128, 122, 115),
@@ -42,15 +42,16 @@ TERRAIN_COLORS = {
 }
 
 # Zone overlay colors
+# Zone overlay colors — SC4-inspired, distinct from terrain
 ZONE_COLORS = {
-    "residential":  (51, 153, 51),
-    "commercial":   (51, 77, 204),
-    "industrial":   (179, 153, 51),
-    "park":         (26, 179, 77),
-    "power_plant":  (153, 51, 51),
-    "water_tower":  (51, 128, 179),
-    "monument":     (179, 128, 51),
-    "road":         (77, 77, 77),
+    "residential":  (80, 170, 60),    # Bright green (SC4 light green zones)
+    "commercial":   (60, 90, 200),    # Blue
+    "industrial":   (190, 170, 60),   # Yellow
+    "park":         (40, 190, 80),    # Vivid green
+    "power_plant":  (160, 60, 50),    # Red-brown
+    "water_tower":  (50, 130, 190),   # Blue
+    "monument":     (180, 130, 50),   # Gold
+    "road":         (65, 65, 68),     # SC4 dark asphalt gray
 }
 
 # Terrain type order (matches Rust enum order and priority)

@@ -107,31 +107,8 @@ struct BuildingModelPool {
     models_ready: bool,
 }
 
-/// Road model handles for each configuration type.
-#[derive(Resource)]
-struct RoadModelPool {
-    straight: Handle<Scene>,
-    bend: Handle<Scene>,
-    crossroad: Handle<Scene>,
-    intersection: Handle<Scene>, // T-junction
-    dead_end: Handle<Scene>,
-    roundabout: Handle<Scene>,
-    has_models: bool,
-}
-
-/// Fallback: procedural road mesh (used when no GLTF road models available).
-#[allow(dead_code)]
-#[derive(Resource)]
-struct RoadMeshRes {
-    handle: Handle<Mesh>,
-    entity: Entity,
-}
-
-#[derive(Component)]
-struct RoadMarker {
-    col: usize,
-    row: usize,
-}
+// Roads render as dark terrain atlas tiles — no separate 3D models or mesh needed.
+// This matches SC4's visual style where roads are flat dark strips on the terrain.
 
 /// Pre-loaded tree scene handles. Uses Kenney GLTF models when available,
 /// falls back to procedural cone meshes.
@@ -424,7 +401,7 @@ fn main() {
             check_models_loaded.in_set(GameSet::Render),
             update_buildings.in_set(GameSet::Render).after(check_models_loaded),
             spawn_trees.in_set(GameSet::Render),
-            spawn_road_models.in_set(GameSet::Render),
+            // Roads render as dark terrain tiles via atlas — no separate mesh/models needed
             tree_lod_update,
             audio_system.in_set(GameSet::Render),
         ))
@@ -705,30 +682,7 @@ fn setup(
     });
     commands.insert_resource(TreeLodTimer(Timer::from_seconds(0.5, TimerMode::Repeating)));
 
-    // Road models from Kenney City Kit (Roads)
-    let road_dir = Path::new("assets/models/roads");
-    let has_road_models = road_dir.join("road-straight.glb").exists();
-    if has_road_models {
-        eprintln!("[SlideCity] Road models found — using Kenney road pieces");
-    } else {
-        eprintln!("[SlideCity] No road models — using procedural road mesh fallback");
-    }
-    let load_road = |name: &str| -> Handle<Scene> {
-        let path = format!("models/roads/{name}#Scene0");
-        asset_server.load(&path)
-    };
-    commands.insert_resource(RoadModelPool {
-        straight: load_road("road-straight.glb"),
-        bend: load_road("road-bend.glb"),
-        crossroad: load_road("road-crossroad.glb"),
-        intersection: load_road("road-intersection.glb"),
-        dead_end: load_road("road-end.glb"),
-        roundabout: load_road("road-roundabout.glb"),
-        has_models: has_road_models,
-    });
-
-    // Road models are spawned per-cell by spawn_road_models system
-    // (no legacy procedural mesh needed)
+    // Roads render as dark terrain tiles via the texture atlas — no 3D models needed
 
     // Audio — load all sound files (Bevy handles missing files gracefully)
     commands.insert_resource(GameAudio {
@@ -1520,12 +1474,11 @@ fn tree_lod_update(
     }
 }
 
-// ===== ROAD MODELS (Kenney City Kit Roads) =====
+// Roads render as dark terrain tiles via the texture atlas.
+// No 3D road models or procedural mesh needed — this matches SC4's visual style
+// where roads are flat dark strips on the terrain surface.
 
-/// Road surface offset above terrain.
-const ROAD_Y_OFFSET: f32 = 0.02;
-
-/// Compute smoothed road height for terrain flattening.
+/// Compute smoothed road height for terrain flattening (used by corner_height).
 fn smoothed_road_height(grid: &Grid, col: usize, row: usize) -> f32 {
     let cell = grid.get(col, row);
     let mut sum = cell.terrain_height;
@@ -1542,132 +1495,7 @@ fn smoothed_road_height(grid: &Grid, col: usize, row: usize) -> f32 {
             }
         }
     }
-    (sum / count) * HEIGHT_SCALE + ROAD_Y_OFFSET
-}
-
-/// 4-bit bitmask: N=8, E=4, S=2, W=1
-fn road_neighbor_mask(grid: &Grid, col: usize, row: usize) -> u8 {
-    let mut mask = 0u8;
-    if row > 0 && grid.get(col, row - 1).tile == TileType::Road { mask |= 8; }
-    if col + 1 < grid.width && grid.get(col + 1, row).tile == TileType::Road { mask |= 4; }
-    if row + 1 < grid.height && grid.get(col, row + 1).tile == TileType::Road { mask |= 2; }
-    if col > 0 && grid.get(col - 1, row).tile == TileType::Road { mask |= 1; }
-    mask
-}
-
-/// Select the road model and Y-axis rotation for a given neighbor bitmask.
-/// Returns (scene_handle, rotation_in_radians).
-fn road_model_for_mask(mask: u8, pool: &RoadModelPool) -> (Handle<Scene>, f32) {
-    use std::f32::consts::{FRAC_PI_2, PI};
-    match mask {
-        // Isolated (no neighbors)
-        0b0000 => (pool.roundabout.clone(), 0.0),
-
-        // Dead-ends (1 neighbor)
-        0b1000 => (pool.dead_end.clone(), 0.0),      // N
-        0b0100 => (pool.dead_end.clone(), -FRAC_PI_2), // E
-        0b0010 => (pool.dead_end.clone(), PI),         // S
-        0b0001 => (pool.dead_end.clone(), FRAC_PI_2),  // W
-
-        // Straight (2 opposite neighbors)
-        0b1010 => (pool.straight.clone(), 0.0),        // N+S
-        0b0101 => (pool.straight.clone(), FRAC_PI_2),  // E+W
-
-        // Bends (2 adjacent neighbors)
-        0b1100 => (pool.bend.clone(), 0.0),            // N+E
-        0b0110 => (pool.bend.clone(), -FRAC_PI_2),     // E+S
-        0b0011 => (pool.bend.clone(), PI),              // S+W
-        0b1001 => (pool.bend.clone(), FRAC_PI_2),      // W+N
-
-        // T-junctions (3 neighbors)
-        0b1110 => (pool.intersection.clone(), 0.0),     // N+E+S (missing W)
-        0b0111 => (pool.intersection.clone(), -FRAC_PI_2), // E+S+W (missing N)
-        0b1011 => (pool.intersection.clone(), PI),       // S+W+N (missing E)
-        0b1101 => (pool.intersection.clone(), FRAC_PI_2), // W+N+E (missing S)
-
-        // 4-way crossroad
-        0b1111 => (pool.crossroad.clone(), 0.0),
-
-        _ => (pool.straight.clone(), 0.0),
-    }
-}
-
-/// Spawn road model entities for each road cell. Incremental via dirty cells.
-fn spawn_road_models(
-    mut commands: Commands,
-    grid_res: Res<GameGrid>,
-    prev_state: Res<PreviousCellState>,
-    road_pool: Res<RoadModelPool>,
-    existing: Query<(Entity, &RoadMarker)>,
-    mut initial_spawn_done: Local<bool>,
-) {
-    if !road_pool.has_models {
-        return;
-    }
-
-    let full_spawn = !*initial_spawn_done;
-    if !full_spawn && prev_state.dirty.is_empty() {
-        return;
-    }
-
-    let grid = &grid_res.grid;
-
-    if full_spawn {
-        *initial_spawn_done = true;
-        for row in 0..grid.height {
-            for col in 0..grid.width {
-                spawn_road_for_cell(&mut commands, grid, col, row, &road_pool);
-            }
-        }
-    } else {
-        // Despawn road models on dirty cells and their neighbors (mask changes affect neighbors)
-        let mut cells_to_rebuild: HashSet<(usize, usize)> = HashSet::new();
-        for &(col, row) in &prev_state.dirty {
-            cells_to_rebuild.insert((col, row));
-            // Also rebuild cardinal neighbors (their mask may have changed)
-            if row > 0 { cells_to_rebuild.insert((col, row - 1)); }
-            if col + 1 < grid.width { cells_to_rebuild.insert((col + 1, row)); }
-            if row + 1 < grid.height { cells_to_rebuild.insert((col, row + 1)); }
-            if col > 0 { cells_to_rebuild.insert((col - 1, row)); }
-        }
-
-        for (entity, marker) in &existing {
-            if cells_to_rebuild.contains(&(marker.col, marker.row)) {
-                commands.entity(entity).despawn();
-            }
-        }
-
-        for &(col, row) in &cells_to_rebuild {
-            spawn_road_for_cell(&mut commands, grid, col, row, &road_pool);
-        }
-    }
-}
-
-fn spawn_road_for_cell(
-    commands: &mut Commands,
-    grid: &Grid,
-    col: usize,
-    row: usize,
-    road_pool: &RoadModelPool,
-) {
-    let cell = grid.get(col, row);
-    if cell.tile != TileType::Road {
-        return;
-    }
-
-    let mask = road_neighbor_mask(grid, col, row);
-    let (scene, rotation) = road_model_for_mask(mask, road_pool);
-    let y = cell.terrain_height * HEIGHT_SCALE;
-    let x = col as f32 * TILE_SIZE + TILE_SIZE / 2.0;
-    let z = row as f32 * TILE_SIZE + TILE_SIZE / 2.0;
-
-    commands.spawn((
-        SceneRoot(scene),
-        Transform::from_xyz(x, y, z)
-            .with_rotation(Quat::from_rotation_y(rotation))
-            .with_scale(Vec3::new(TILE_SIZE, 1.0, TILE_SIZE)), // Match tile grid scale
-        RoadMarker { col, row },
-    ));
+    (sum / count) * HEIGHT_SCALE + 0.02
 }
 
 // ===== AUDIO =====
